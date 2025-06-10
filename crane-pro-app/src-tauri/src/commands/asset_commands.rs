@@ -6,12 +6,12 @@
 use crate::api::{ApiResponse, QueryFilterRequest, CreateAssetRequest, AssetUpdateRequest,
                 CreateComponentRequest, ComponentUpdateRequest, PaginatedResponse};
 use crate::commands::AppState;
-use crate::middleware::{Permissions, auth::AuthHelper};
-use crate::models::{Asset, Component, PaginatedResult};
+use crate::middleware::auth::AuthHelper;
+use crate::models::{Asset, Component};
 use crate::services::AssetUpdateData;
-use crate::{require_auth, require_resource_access, time_command, command_handler};
+use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
-use log::{info, debug, error};
+use log::{info, debug};
 
 /// Create a new asset
 #[tauri::command]

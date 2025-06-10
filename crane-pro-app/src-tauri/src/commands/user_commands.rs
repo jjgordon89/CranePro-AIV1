@@ -6,13 +6,12 @@
 use crate::api::{ApiResponse, QueryFilterRequest, CreateUserRequest, UserUpdateRequest,
                 LoginRequest, ChangePasswordRequest, PaginatedResponse, LoginResponse};
 use crate::commands::AppState;
-use crate::middleware::{Permissions, auth::AuthHelper};
-use crate::models::{User, PaginatedResult};
+use crate::middleware::auth::AuthHelper;
+use crate::models::User;
 use crate::services::UserUpdateData;
-use crate::{require_auth, require_resource_access, time_command, command_handler};
+use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
-use log::{info, debug, error, warn};
-use chrono::Utc;
+use log::{info, debug, warn};
 
 /// Create a new user
 #[tauri::command]
@@ -205,10 +204,8 @@ pub async fn login_command(
 
         // Get user details (without password hash)
         let user = state.services.users.get_user_by_id(session.user_id)
-            .map_err(|e| format!("Failed to get user details: {}", e))?;
-
-        let login_response = LoginResponse {
-            user: crate::api::responses::UserResponse::from(user),
+            .map_err(|e| format!("Failed to get user details: {}", e))?;        let login_response = LoginResponse {
+            user: user,
             token,
             expires_at: session.expires_at,
             permissions: session.permissions.clone(),

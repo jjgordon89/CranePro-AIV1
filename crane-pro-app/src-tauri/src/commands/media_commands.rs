@@ -62,17 +62,19 @@ pub async fn upload_file_command(
         let full_upload_path = format!("./data/{}", upload_dir);
         
         fs::create_dir_all(&full_upload_path)
-            .map_err(|e| format!("Failed to create upload directory: {}", e))?;
-
-        // Write file to disk
+            .map_err(|e| format!("Failed to create upload directory: {}", e))?;        // Write file to disk
         let file_path = format!("{}/{}", upload_dir, unique_filename);
         let full_file_path = format!("./data/{}", file_path);
         
         fs::write(&full_file_path, &file_data.file_data)
             .map_err(|e| format!("Failed to write file: {}", e))?;
 
+        // Store file_type before moving file_data
+        let file_type = file_data.file_type.clone();
+        let file_data_len = file_data.file_data.len() as i64;
+
         // Create media file record
-        let media_file = file_data.to_media_file(file_path, file_data.file_data.len() as i64);
+        let media_file = file_data.to_media_file(file_path, file_data_len);
         let created_media = state.services.media.create_media_file(media_file)
             .map_err(|e| {
                 // Clean up file if database operation fails
@@ -81,7 +83,7 @@ pub async fn upload_file_command(
             })?;
 
         // Queue for AI analysis if it's an image
-        if matches!(file_data.file_type, MediaType::Image) {
+        if matches!(file_type, MediaType::Image) {
             let _ = state.services.media.queue_for_ai_analysis(created_media.id);
         }
 
@@ -271,17 +273,18 @@ pub async fn upload_inspection_photo_command(
         let full_upload_path = format!("./data/{}", upload_dir);
         
         fs::create_dir_all(&full_upload_path)
-            .map_err(|e| format!("Failed to create upload directory: {}", e))?;
-
-        // Write file to disk
+            .map_err(|e| format!("Failed to create upload directory: {}", e))?;        // Write file to disk
         let file_path = format!("{}/{}", upload_dir, unique_filename);
         let full_file_path = format!("./data/{}", file_path);
         
         fs::write(&full_file_path, &photo_data.file_data)
             .map_err(|e| format!("Failed to write photo: {}", e))?;
 
+        // Store file data length before moving photo_data
+        let file_data_len = photo_data.file_data.len() as i64;
+
         // Create media file record
-        let media_file = photo_data.to_media_file(file_path, photo_data.file_data.len() as i64);
+        let media_file = photo_data.to_media_file(file_path, file_data_len);
         let created_media = state.services.media.create_media_file(media_file)
             .map_err(|e| {
                 // Clean up file if database operation fails

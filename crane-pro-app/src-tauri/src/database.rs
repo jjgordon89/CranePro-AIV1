@@ -23,7 +23,7 @@ pub struct DatabasePool {
 
 impl DatabasePool {
     /// Create a new database pool
-    pub fn new(db_path: PathBuf) -> AppResult<Self> {
+    pub async fn new(db_path: PathBuf) -> AppResult<Self> {
         let mut connections = Vec::with_capacity(POOL_SIZE);
         
         // Create initial connections
@@ -35,6 +35,22 @@ impl DatabasePool {
         Ok(DatabasePool {
             connections: Arc::new(Mutex::new(connections)),
             db_path,
+        })
+    }
+
+    /// Create a new in-memory database pool for testing
+    pub async fn new_in_memory() -> AppResult<Self> {
+        let mut connections = Vec::with_capacity(POOL_SIZE);
+        
+        // Create initial in-memory connections
+        for _ in 0..POOL_SIZE {
+            let conn = Self::create_in_memory_connection()?;
+            connections.push(conn);
+        }
+
+        Ok(DatabasePool {
+            connections: Arc::new(Mutex::new(connections)),
+            db_path: PathBuf::from(":memory:"),
         })
     }
 
@@ -55,7 +71,18 @@ impl DatabasePool {
         Ok(conn)
     }
 
-    /// Get a connection from the pool
+    /// Create a new in-memory database connection
+    fn create_in_memory_connection() -> AppResult<Connection> {
+        let conn = Connection::open_in_memory()?;
+
+        // Configure connection
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
+        conn.execute("PRAGMA synchronous = NORMAL", [])?;
+        conn.execute("PRAGMA cache_size = -64000", [])?; // 64MB cache
+        conn.execute("PRAGMA temp_store = memory", [])?;
+
+        Ok(conn)
+    }    /// Get a connection from the pool
     pub fn get_connection(&self) -> AppResult<Connection> {
         let mut pool = self.connections.lock()
             .map_err(|_| AppError::database("Failed to acquire connection pool lock"))?;
@@ -64,7 +91,11 @@ impl DatabasePool {
             Ok(conn)
         } else {
             // Pool exhausted, create a new connection
-            Self::create_connection(&self.db_path)
+            if self.db_path.to_str() == Some(":memory:") {
+                Self::create_in_memory_connection()
+            } else {
+                Self::create_connection(&self.db_path)
+            }
         }
     }
 
@@ -101,19 +132,28 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Create connection pool
-        let pool = DatabasePool::new(db_path.clone())?;
-        
-        // Initialize migration manager
+        let pool = DatabasePool::new(db_path).await?;
         let migrations = MigrationManager::new();
-        
-        let database = Database { pool, migrations };
-        
+
+        let mut db = Self { pool, migrations };
+
         // Run migrations
-        database.migrate().await?;
-        
-        info!("Database initialized successfully");
-        Ok(database)
+        db.migrate().await?;
+
+        Ok(db)
+    }    /// Initialize an in-memory database for testing
+    pub async fn new_in_memory() -> AppResult<Self> {
+        info!("Initializing in-memory database");
+
+        let pool = DatabasePool::new_in_memory().await?;
+        let migrations = MigrationManager::new();
+
+        let mut db = Self { pool, migrations };
+
+        // Run migrations
+        db.migrate().await?;
+
+        Ok(db)
     }
 
     /// Execute a transaction

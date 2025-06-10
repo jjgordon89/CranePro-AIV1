@@ -133,6 +133,7 @@ pub struct LoginResponse {
     pub token: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
     pub permissions: Vec<String>,
+    pub session_id: String,
 }
 
 /// Common query filter for paginated endpoints
