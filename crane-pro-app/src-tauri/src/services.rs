@@ -1,0 +1,1981 @@
+//! Services module containing business logic for all major entities
+//! 
+//! This module implements the repository pattern with comprehensive
+//! business logic, CRUD operations, and transaction management.
+
+use crate::database::Database;
+use crate::errors::{AppError, AppResult};
+use crate::models::*;
+use rusqlite::{params, Row};
+use chrono::{DateTime, Utc, NaiveDate};
+use serde_json::Value as JsonValue;
+use log::{info, debug};
+use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+// =============================================================================
+// Data Transfer Objects (DTOs)
+// =============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetUpdateData {
+    pub asset_name: Option<String>,
+    pub asset_type: Option<String>,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub serial_number: Option<String>,
+    pub manufacture_date: Option<NaiveDate>,
+    pub installation_date: Option<NaiveDate>,
+    pub capacity: Option<f64>,
+    pub capacity_unit: Option<String>,
+    pub location_id: Option<i64>,
+    pub status: Option<AssetStatus>,
+    pub description: Option<String>,
+    pub specifications: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentUpdateData {
+    pub component_name: Option<String>,
+    pub component_type: Option<String>,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub serial_number: Option<String>,
+    pub parent_component_id: Option<i64>,
+    pub specifications: Option<JsonValue>,
+    pub status: Option<ComponentStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectionUpdateData {
+    pub inspector_id: Option<i64>,
+    pub inspection_type: Option<InspectionType>,
+    pub compliance_standard: Option<String>,
+    pub scheduled_date: Option<DateTime<Utc>>,
+    pub actual_date: Option<DateTime<Utc>>,
+    pub status: Option<InspectionStatus>,
+    pub overall_condition: Option<Condition>,
+    pub checklist_data: Option<JsonValue>,
+    pub notes: Option<String>,
+    pub ai_analysis_results: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectionItemUpdateData {
+    pub component_id: Option<i64>,
+    pub item_name: Option<String>,
+    pub item_category: Option<String>,
+    pub condition: Option<Condition>,
+    pub finding: Option<String>,
+    pub severity: Option<Severity>,
+    pub is_compliant: Option<bool>,
+    pub corrective_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserUpdateData {
+    pub username: Option<String>,
+    pub email: Option<String>,
+    pub role: Option<UserRole>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub phone: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaFileUpdateData {
+    pub file_name: Option<String>,
+    pub description: Option<String>,
+    pub ai_analysis_metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResult {
+    pub is_valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+    pub compliance_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetSummaryReport {
+    pub asset_id: i64,
+    pub asset_name: String,
+    pub total_inspections: i64,
+    pub completed_inspections: i64,
+    pub pending_inspections: i64,
+    pub last_inspection_date: Option<DateTime<Utc>>,
+    pub next_inspection_date: Option<DateTime<Utc>>,
+    pub overall_condition: Option<Condition>,
+    pub maintenance_records: i64,
+    pub compliance_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectionCompletionReport {
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub total_scheduled: i64,
+    pub total_completed: i64,
+    pub completion_rate: f64,
+    pub by_inspector: HashMap<String, i64>,
+    pub by_asset_type: HashMap<String, i64>,
+    pub average_completion_time_hours: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceStatusReport {
+    pub location_id: Option<i64>,
+    pub total_assets: i64,
+    pub compliant_assets: i64,
+    pub non_compliant_assets: i64,
+    pub overdue_inspections: i64,
+    pub compliance_percentage: f64,
+    pub critical_findings: i64,
+    pub by_standard: HashMap<String, ComplianceStandardStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComplianceStandardStatus {
+    pub standard_code: String,
+    pub total_assets: i64,
+    pub compliant: i64,
+    pub compliance_rate: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceHistoryReport {
+    pub asset_id: i64,
+    pub asset_name: String,
+    pub total_maintenance_records: i64,
+    pub preventive_maintenance: i64,
+    pub corrective_maintenance: i64,
+    pub emergency_maintenance: i64,
+    pub total_cost: f64,
+    pub average_cost_per_maintenance: f64,
+    pub last_maintenance_date: Option<DateTime<Utc>>,
+    pub next_scheduled_maintenance: Option<DateTime<Utc>>,
+}
+
+// =============================================================================
+// Asset Service
+// =============================================================================
+
+pub struct AssetService {
+    database: Arc<Database>,
+}
+
+impl AssetService {
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
+    }
+
+    pub fn create_asset(&self, asset: Asset) -> AppResult<Asset> {
+        info!("Creating new asset: {}", asset.asset_number);
+        asset.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO assets (asset_number, asset_name, asset_type, manufacturer, model, 
+                 serial_number, manufacture_date, installation_date, capacity, capacity_unit, 
+                 location_id, status, description, specifications, created_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                 RETURNING id",
+                params![
+                    asset.asset_number, asset.asset_name, asset.asset_type,
+                    asset.manufacturer, asset.model, asset.serial_number,
+                    asset.manufacture_date, asset.installation_date,
+                    asset.capacity, asset.capacity_unit, asset.location_id,
+                    asset.status.to_string(), asset.description,
+                    asset.specifications.as_ref().map(|s| s.to_string()),
+                    asset.created_by
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("Asset created with ID: {}", id);
+            self.get_asset_by_id(id)
+        })
+    }
+
+    pub fn get_asset_by_id(&self, id: i64) -> AppResult<Asset> {
+        debug!("Fetching asset by ID: {}", id);
+        let conn = self.database.get_connection()?;
+        
+        let asset = conn.query_row(
+            "SELECT id, asset_number, asset_name, asset_type, manufacturer, model,
+             serial_number, manufacture_date, installation_date, capacity, capacity_unit,
+             location_id, status, description, specifications, created_by, created_at, updated_at
+             FROM assets WHERE id = ?1",
+            params![id],
+            |row| self.row_to_asset(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Asset".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(asset)
+    }
+
+    pub fn get_assets_by_location(&self, location_id: i64, filter: QueryFilter) -> AppResult<PaginatedResult<Asset>> {
+        info!("Fetching assets for location: {} with filter: {:?}", location_id, filter);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+        let sort_order = filter.sort_order.unwrap_or(SortOrder::Desc);
+
+        // Simple implementation without dynamic filters for now
+        let order_by = format!(" ORDER BY {} {}",
+            filter.sort_by.unwrap_or("created_at".to_string()), sort_order);
+
+        let query = format!(
+            "SELECT id, asset_number, asset_name, asset_type, manufacturer, model,
+             serial_number, manufacture_date, installation_date, capacity, capacity_unit,
+             location_id, status, description, specifications, created_by, created_at, updated_at
+             FROM assets WHERE location_id = ?1 {} LIMIT {} OFFSET {}",
+            order_by, limit, offset
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let asset_iter = stmt.query_map([location_id], |row| self.row_to_asset(row))?;
+
+        let mut assets = Vec::new();
+        for asset in asset_iter {
+            assets.push(asset?);
+        }
+
+        // Get total count
+        let total_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assets WHERE location_id = ?1",
+            [location_id],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(assets, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    pub fn update_asset(&self, id: i64, updates: AssetUpdateData) -> AppResult<Asset> {
+        info!("Updating asset: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            // Simple implementation - update individual fields
+            if let Some(asset_name) = &updates.asset_name {
+                conn.execute("UPDATE assets SET asset_name = ?1 WHERE id = ?2", params![asset_name, id])?;
+            }
+            if let Some(asset_type) = &updates.asset_type {
+                conn.execute("UPDATE assets SET asset_type = ?1 WHERE id = ?2", params![asset_type, id])?;
+            }
+            if let Some(manufacturer) = &updates.manufacturer {
+                conn.execute("UPDATE assets SET manufacturer = ?1 WHERE id = ?2", params![manufacturer, id])?;
+            }
+            if let Some(model) = &updates.model {
+                conn.execute("UPDATE assets SET model = ?1 WHERE id = ?2", params![model, id])?;
+            }
+            if let Some(status) = &updates.status {
+                conn.execute("UPDATE assets SET status = ?1 WHERE id = ?2", params![status.to_string(), id])?;
+            }
+            if let Some(description) = &updates.description {
+                conn.execute("UPDATE assets SET description = ?1 WHERE id = ?2", params![description, id])?;
+            }
+
+            debug!("Asset {} updated successfully", id);
+            self.get_asset_by_id(id)
+        })
+    }
+
+    pub fn delete_asset(&self, id: i64) -> AppResult<()> {
+        info!("Deleting asset: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            let rows_affected = conn.execute("DELETE FROM assets WHERE id = ?1", params![id])?;
+            
+            if rows_affected == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "Asset".to_string(),
+                    field: "id".to_string(),
+                    value: id.to_string(),
+                });
+            }
+            
+            debug!("Asset {} deleted successfully", id);
+            Ok(())
+        })
+    }
+
+    pub fn search_assets(&self, query: String, filter: QueryFilter) -> AppResult<PaginatedResult<Asset>> {
+        info!("Searching assets with query: {}", query);
+        let conn = self.database.get_connection()?;
+
+        let search_term = format!("%{}%", query);
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+
+        let search_query = format!(
+            "SELECT id, asset_number, asset_name, asset_type, manufacturer, model,
+             serial_number, manufacture_date, installation_date, capacity, capacity_unit,
+             location_id, status, description, specifications, created_by, created_at, updated_at
+             FROM assets
+             WHERE asset_name LIKE ?1 OR asset_number LIKE ?1 OR asset_type LIKE ?1 OR manufacturer LIKE ?1
+             ORDER BY created_at DESC LIMIT {} OFFSET {}",
+            limit, offset
+        );
+
+        let mut stmt = conn.prepare(&search_query)?;
+        let asset_iter = stmt.query_map([&search_term], |row| self.row_to_asset(row))?;
+
+        let mut assets = Vec::new();
+        for asset in asset_iter {
+            assets.push(asset?);
+        }
+
+        let total_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assets
+             WHERE asset_name LIKE ?1 OR asset_number LIKE ?1 OR asset_type LIKE ?1 OR manufacturer LIKE ?1",
+            [&search_term],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(assets, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    pub fn get_asset_components(&self, asset_id: i64) -> AppResult<Vec<Component>> {
+        debug!("Fetching components for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, asset_id, component_name, component_type, manufacturer, model,
+             serial_number, parent_component_id, specifications, status, created_at, updated_at
+             FROM components WHERE asset_id = ?1 ORDER BY component_name"
+        )?;
+
+        let component_iter = stmt.query_map([asset_id], |row| self.row_to_component(row))?;
+
+        let mut components = Vec::new();
+        for component in component_iter {
+            components.push(component?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(components)
+    }
+
+    pub fn create_component(&self, component: Component) -> AppResult<Component> {
+        info!("Creating new component: {}", component.component_name);
+        component.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO components (asset_id, component_name, component_type, manufacturer,
+                 model, serial_number, parent_component_id, specifications, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 RETURNING id",
+                params![
+                    component.asset_id, component.component_name, component.component_type,
+                    component.manufacturer, component.model, component.serial_number,
+                    component.parent_component_id,
+                    component.specifications.as_ref().map(|s| s.to_string()),
+                    component.status.to_string()
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("Component created with ID: {}", id);
+            self.get_component_by_id(id)
+        })
+    }
+
+    pub fn update_component(&self, id: i64, updates: ComponentUpdateData) -> AppResult<Component> {
+        info!("Updating component: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            if let Some(component_name) = &updates.component_name {
+                conn.execute("UPDATE components SET component_name = ?1 WHERE id = ?2", params![component_name, id])?;
+            }
+            if let Some(component_type) = &updates.component_type {
+                conn.execute("UPDATE components SET component_type = ?1 WHERE id = ?2", params![component_type, id])?;
+            }
+            if let Some(status) = &updates.status {
+                conn.execute("UPDATE components SET status = ?1 WHERE id = ?2", params![status.to_string(), id])?;
+            }
+
+            debug!("Component {} updated successfully", id);
+            self.get_component_by_id(id)
+        })
+    }
+
+    fn get_component_by_id(&self, id: i64) -> AppResult<Component> {
+        let conn = self.database.get_connection()?;
+        let component = conn.query_row(
+            "SELECT id, asset_id, component_name, component_type, manufacturer, model,
+             serial_number, parent_component_id, specifications, status, created_at, updated_at
+             FROM components WHERE id = ?1",
+            params![id],
+            |row| self.row_to_component(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Component".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(component)
+    }
+
+    fn row_to_asset(&self, row: &Row) -> rusqlite::Result<Asset> {
+        Ok(Asset {
+            id: row.get(0)?,
+            asset_number: row.get(1)?,
+            asset_name: row.get(2)?,
+            asset_type: row.get(3)?,
+            manufacturer: row.get(4)?,
+            model: row.get(5)?,
+            serial_number: row.get(6)?,
+            manufacture_date: row.get(7)?,
+            installation_date: row.get(8)?,
+            capacity: row.get(9)?,
+            capacity_unit: row.get(10)?,
+            location_id: row.get(11)?,
+            status: row.get::<_, String>(12)?.parse().unwrap_or(AssetStatus::Active),
+            description: row.get(13)?,
+            specifications: row.get::<_, Option<String>>(14)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            created_by: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
+        })
+    }
+
+    fn row_to_component(&self, row: &Row) -> rusqlite::Result<Component> {
+        Ok(Component {
+            id: row.get(0)?,
+            asset_id: row.get(1)?,
+            component_name: row.get(2)?,
+            component_type: row.get(3)?,
+            manufacturer: row.get(4)?,
+            model: row.get(5)?,
+            serial_number: row.get(6)?,
+            parent_component_id: row.get(7)?,
+            specifications: row.get::<_, Option<String>>(8)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            status: row.get::<_, String>(9)?.parse().unwrap_or(ComponentStatus::Active),
+            created_at: row.get(10)?,
+            updated_at: row.get(11)?,
+        })
+    }
+}
+
+// =============================================================================
+// Inspection Service
+// =============================================================================
+
+pub struct InspectionService {
+    database: Arc<Database>,
+}
+
+impl InspectionService {
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
+    }
+
+    pub fn create_inspection(&self, inspection: Inspection) -> AppResult<Inspection> {
+        info!("Creating new inspection for asset: {}", inspection.asset_id);
+        inspection.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO inspections (asset_id, inspector_id, inspection_type, compliance_standard,
+                 scheduled_date, actual_date, status, overall_condition, checklist_data, notes, ai_analysis_results)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 RETURNING id",
+                params![
+                    inspection.asset_id, inspection.inspector_id, inspection.inspection_type.to_string(),
+                    inspection.compliance_standard, inspection.scheduled_date, inspection.actual_date,
+                    inspection.status.to_string(),
+                    inspection.overall_condition.as_ref().map(|c| c.to_string()),
+                    inspection.checklist_data.as_ref().map(|d| d.to_string()),
+                    inspection.notes,
+                    inspection.ai_analysis_results.as_ref().map(|r| r.to_string())
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("Inspection created with ID: {}", id);
+            self.get_inspection_by_id(id)
+        })
+    }
+
+    pub fn get_inspection_by_id(&self, id: i64) -> AppResult<Inspection> {
+        debug!("Fetching inspection by ID: {}", id);
+        let conn = self.database.get_connection()?;
+        
+        let inspection = conn.query_row(
+            "SELECT id, asset_id, inspector_id, inspection_type, compliance_standard,
+             scheduled_date, actual_date, status, overall_condition, checklist_data, notes,
+             ai_analysis_results, created_at, updated_at
+             FROM inspections WHERE id = ?1",
+            params![id],
+            |row| self.row_to_inspection(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Inspection".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(inspection)
+    }
+
+    pub fn update_inspection(&self, id: i64, updates: InspectionUpdateData) -> AppResult<Inspection> {
+        info!("Updating inspection: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            if let Some(status) = &updates.status {
+                conn.execute("UPDATE inspections SET status = ?1 WHERE id = ?2", params![status.to_string(), id])?;
+            }
+            if let Some(actual_date) = &updates.actual_date {
+                conn.execute("UPDATE inspections SET actual_date = ?1 WHERE id = ?2", params![actual_date, id])?;
+            }
+            if let Some(overall_condition) = &updates.overall_condition {
+                conn.execute("UPDATE inspections SET overall_condition = ?1 WHERE id = ?2", params![overall_condition.to_string(), id])?;
+            }
+            if let Some(notes) = &updates.notes {
+                conn.execute("UPDATE inspections SET notes = ?1 WHERE id = ?2", params![notes, id])?;
+            }
+
+            debug!("Inspection {} updated successfully", id);
+            self.get_inspection_by_id(id)
+        })
+    }
+
+    pub fn submit_inspection(&self, id: i64) -> AppResult<Inspection> {
+        info!("Submitting inspection: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            conn.execute(
+                "UPDATE inspections SET status = 'Completed', actual_date = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![id]
+            )?;
+            
+            debug!("Inspection {} submitted successfully", id);
+            self.get_inspection_by_id(id)
+        })
+    }
+
+    pub fn get_inspections_by_asset(&self, asset_id: i64, filter: QueryFilter) -> AppResult<PaginatedResult<Inspection>> {
+        info!("Fetching inspections for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+
+        let mut stmt = conn.prepare(
+            "SELECT id, asset_id, inspector_id, inspection_type, compliance_standard,
+             scheduled_date, actual_date, status, overall_condition, checklist_data, notes,
+             ai_analysis_results, created_at, updated_at
+             FROM inspections WHERE asset_id = ?1 
+             ORDER BY created_at DESC LIMIT ?2 OFFSET ?3"
+        )?;
+
+        let inspection_iter = stmt.query_map(params![asset_id, limit, offset], |row| self.row_to_inspection(row))?;
+
+        let mut inspections = Vec::new();
+        for inspection in inspection_iter {
+            inspections.push(inspection?);
+        }
+
+        let total_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inspections WHERE asset_id = ?1",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(inspections, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    pub fn get_pending_inspections(&self, inspector_id: Option<i64>) -> AppResult<Vec<Inspection>> {
+        info!("Fetching pending inspections");
+        let conn = self.database.get_connection()?;
+
+        let query = if let Some(_inspector_id) = inspector_id {
+            "SELECT id, asset_id, inspector_id, inspection_type, compliance_standard,
+             scheduled_date, actual_date, status, overall_condition, checklist_data, notes,
+             ai_analysis_results, created_at, updated_at
+             FROM inspections WHERE status IN ('Scheduled', 'In Progress') AND inspector_id = ?1
+             ORDER BY scheduled_date ASC"
+        } else {
+            "SELECT id, asset_id, inspector_id, inspection_type, compliance_standard,
+             scheduled_date, actual_date, status, overall_condition, checklist_data, notes,
+             ai_analysis_results, created_at, updated_at
+             FROM inspections WHERE status IN ('Scheduled', 'In Progress')
+             ORDER BY scheduled_date ASC"
+        };
+
+        let mut stmt = conn.prepare(query)?;
+        let row_mapper = |row: &Row| self.row_to_inspection(row);
+        let inspection_iter = if let Some(inspector_id) = inspector_id {
+            stmt.query_map(params![inspector_id], row_mapper)?
+        } else {
+            stmt.query_map([], row_mapper)?
+        };
+
+        let mut inspections = Vec::new();
+        for inspection in inspection_iter {
+            inspections.push(inspection?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(inspections)
+    }
+
+    pub fn create_inspection_item(&self, item: InspectionItem) -> AppResult<InspectionItem> {
+        info!("Creating inspection item: {}", item.item_name);
+        item.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO inspection_items (inspection_id, component_id, item_name, item_category,
+                 condition, finding, severity, is_compliant, corrective_action)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 RETURNING id",
+                params![
+                    item.inspection_id, item.component_id, item.item_name, item.item_category,
+                    item.condition.as_ref().map(|c| c.to_string()), item.finding,
+                    item.severity.as_ref().map(|s| s.to_string()), item.is_compliant,
+                    item.corrective_action
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("Inspection item created with ID: {}", id);
+            self.get_inspection_item_by_id(id)
+        })
+    }
+
+    pub fn update_inspection_item(&self, id: i64, updates: InspectionItemUpdateData) -> AppResult<InspectionItem> {
+        info!("Updating inspection item: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            // Simple implementation - update individual fields
+            if let Some(condition) = &updates.condition {
+                conn.execute("UPDATE inspection_items SET condition = ?1 WHERE id = ?2", params![condition.to_string(), id])?;
+            }
+            if let Some(finding) = &updates.finding {
+                conn.execute("UPDATE inspection_items SET finding = ?1 WHERE id = ?2", params![finding, id])?;
+            }
+            if let Some(is_compliant) = &updates.is_compliant {
+                conn.execute("UPDATE inspection_items SET is_compliant = ?1 WHERE id = ?2", params![is_compliant, id])?;
+            }
+            if let Some(component_id) = &updates.component_id {
+                conn.execute("UPDATE inspection_items SET component_id = ?1 WHERE id = ?2", params![component_id, id])?;
+            }
+            if let Some(item_name) = &updates.item_name {
+                conn.execute("UPDATE inspection_items SET item_name = ?1 WHERE id = ?2", params![item_name, id])?;
+            }
+            if let Some(item_category) = &updates.item_category {
+                conn.execute("UPDATE inspection_items SET item_category = ?1 WHERE id = ?2", params![item_category, id])?;
+            }
+            if let Some(severity) = &updates.severity {
+                conn.execute("UPDATE inspection_items SET severity = ?1 WHERE id = ?2", params![severity.to_string(), id])?;
+            }
+            if let Some(corrective_action) = &updates.corrective_action {
+                conn.execute("UPDATE inspection_items SET corrective_action = ?1 WHERE id = ?2", params![corrective_action, id])?;
+            }
+
+            debug!("Inspection item {} updated successfully", id);
+            self.get_inspection_item_by_id(id)
+        })
+    }
+
+    pub fn get_inspection_items(&self, inspection_id: i64) -> AppResult<Vec<InspectionItem>> {
+        debug!("Fetching inspection items for inspection: {}", inspection_id);
+        let conn = self.database.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, inspection_id, component_id, item_name, item_category, condition,
+             finding, severity, is_compliant, corrective_action, created_at
+             FROM inspection_items WHERE inspection_id = ?1 ORDER BY item_name"
+        )?;
+
+        let item_iter = stmt.query_map(params![inspection_id], |row| self.row_to_inspection_item(row))?;
+
+        let mut items = Vec::new();
+        for item in item_iter {
+            items.push(item?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(items)
+    }
+
+    fn get_inspection_item_by_id(&self, id: i64) -> AppResult<InspectionItem> {
+        let conn = self.database.get_connection()?;
+        let item = conn.query_row(
+            "SELECT id, inspection_id, component_id, item_name, item_category, condition,
+             finding, severity, is_compliant, corrective_action, created_at
+             FROM inspection_items WHERE id = ?1",
+            params![id],
+            |row| self.row_to_inspection_item(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "InspectionItem".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(item)
+    }
+
+    fn row_to_inspection(&self, row: &Row) -> rusqlite::Result<Inspection> {
+        Ok(Inspection {
+            id: row.get(0)?,
+            asset_id: row.get(1)?,
+            inspector_id: row.get(2)?,
+            inspection_type: row.get::<_, String>(3)?.parse().unwrap_or(InspectionType::Frequent),
+            compliance_standard: row.get(4)?,
+            scheduled_date: row.get(5)?,
+            actual_date: row.get(6)?,
+            status: row.get::<_, String>(7)?.parse().unwrap_or(InspectionStatus::Scheduled),
+            overall_condition: row.get::<_, Option<String>>(8)?
+                .and_then(|s| s.parse().ok()),
+            checklist_data: row.get::<_, Option<String>>(9)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            notes: row.get(10)?,
+            ai_analysis_results: row.get::<_, Option<String>>(11)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
+        })
+    }
+
+    fn row_to_inspection_item(&self, row: &Row) -> rusqlite::Result<InspectionItem> {
+        Ok(InspectionItem {
+            id: row.get(0)?,
+            inspection_id: row.get(1)?,
+            component_id: row.get(2)?,
+            item_name: row.get(3)?,
+            item_category: row.get(4)?,
+            condition: row.get::<_, Option<String>>(5)?
+                .and_then(|s| s.parse().ok()),
+            finding: row.get(6)?,
+            severity: row.get::<_, Option<String>>(7)?
+                .and_then(|s| s.parse().ok()),
+            is_compliant: row.get(8)?,
+            corrective_action: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    }
+}
+
+// =============================================================================
+// Compliance Service
+// =============================================================================
+
+pub struct ComplianceService {
+    database: Arc<Database>,
+}
+
+impl ComplianceService {
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
+    }
+
+    pub fn get_compliance_standards(&self) -> AppResult<Vec<ComplianceStandard>> {
+        debug!("Fetching all compliance standards");
+        let conn = self.database.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, standard_code, standard_name, version, requirements, is_active, created_at, updated_at
+             FROM compliance_standards WHERE is_active = 1 ORDER BY standard_code"
+        )?;
+
+        let standard_iter = stmt.query_map([], |row| self.row_to_compliance_standard(row))?;
+
+        let mut standards = Vec::new();
+        for standard in standard_iter {
+            standards.push(standard?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(standards)
+    }
+
+    pub fn get_compliance_standard_by_code(&self, code: String) -> AppResult<ComplianceStandard> {
+        debug!("Fetching compliance standard by code: {}", code);
+        let conn = self.database.get_connection()?;
+
+        let standard = conn.query_row(
+            "SELECT id, standard_code, standard_name, version, requirements, is_active, created_at, updated_at
+             FROM compliance_standards WHERE standard_code = ?1 AND is_active = 1",
+            params![code],
+            |row| self.row_to_compliance_standard(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "ComplianceStandard".to_string(),
+            field: "standard_code".to_string(),
+            value: code,
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(standard)
+    }
+
+    pub fn get_checklist_templates_by_standard(&self, standard_id: i64) -> AppResult<Vec<ComplianceChecklistTemplate>> {
+        debug!("Fetching checklist templates for standard: {}", standard_id);
+        let conn = self.database.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, standard_id, template_name, inspection_type, checklist_structure, created_at, updated_at
+             FROM compliance_checklist_templates WHERE standard_id = ?1 ORDER BY template_name"
+        )?;
+
+        let template_iter = stmt.query_map(params![standard_id], |row| self.row_to_checklist_template(row))?;
+
+        let mut templates = Vec::new();
+        for template in template_iter {
+            templates.push(template?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(templates)
+    }
+
+    pub fn generate_inspection_checklist(&self, standard_id: i64, inspection_type: InspectionType) -> AppResult<JsonValue> {
+        info!("Generating inspection checklist for standard: {} and type: {}", standard_id, inspection_type);
+        let conn = self.database.get_connection()?;
+
+        let template = conn.query_row(
+            "SELECT checklist_structure FROM compliance_checklist_templates 
+             WHERE standard_id = ?1 AND inspection_type = ?2",
+            params![standard_id, inspection_type.to_string()],
+            |row| row.get::<_, String>(0),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "ChecklistTemplate".to_string(),
+            field: "standard_id_inspection_type".to_string(),
+            value: format!("{}_{}", standard_id, inspection_type),
+        })?;
+
+        self.database.return_connection(conn);
+        
+        serde_json::from_str(&template).map_err(|e| AppError::InvalidFormat {
+            field: "checklist_structure".to_string(),
+            expected: "valid JSON".to_string(),
+            actual: e.to_string(),
+        })
+    }
+
+    pub fn validate_inspection_completion(&self, inspection_id: i64) -> AppResult<ValidationResult> {
+        info!("Validating inspection completion: {}", inspection_id);
+        let conn = self.database.get_connection()?;
+
+        // Get inspection details
+        let inspection = conn.query_row(
+            "SELECT status, checklist_data FROM inspections WHERE id = ?1",
+            params![inspection_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Inspection".to_string(),
+            field: "id".to_string(),
+            value: inspection_id.to_string(),
+        })?;
+
+        let (status, checklist_data) = inspection;
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        // Basic validation
+        if status != "Completed" {
+            errors.push("Inspection must be completed".to_string());
+        }
+
+        if checklist_data.is_none() {
+            errors.push("Checklist data is required".to_string());
+        }
+
+        // Get inspection items and check completion
+        let item_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inspection_items WHERE inspection_id = ?1",
+            params![inspection_id],
+            |row| row.get(0),
+        )?;
+
+        if item_count == 0 {
+            warnings.push("No inspection items found".to_string());
+        }
+
+        // Check for items without compliance status
+        let incomplete_items: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inspection_items WHERE inspection_id = ?1 AND is_compliant IS NULL",
+            params![inspection_id],
+            |row| row.get(0),
+        )?;
+
+        if incomplete_items > 0 {
+            warnings.push(format!("{} items missing compliance status", incomplete_items));
+        }
+
+        // Calculate compliance score
+        let compliance_score = self.calculate_compliance_score(inspection_id)?;
+
+        self.database.return_connection(conn);
+
+        Ok(ValidationResult {
+            is_valid: errors.is_empty(),
+            errors,
+            warnings,
+            compliance_score,
+        })
+    }
+
+    pub fn calculate_compliance_score(&self, inspection_id: i64) -> AppResult<f64> {
+        debug!("Calculating compliance score for inspection: {}", inspection_id);
+        let conn = self.database.get_connection()?;
+
+        let (total_items, compliant_items): (i64, i64) = conn.query_row(
+            "SELECT 
+                COUNT(*) as total,
+                COUNT(CASE WHEN is_compliant = 1 THEN 1 END) as compliant
+             FROM inspection_items WHERE inspection_id = ?1",
+            params![inspection_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        self.database.return_connection(conn);
+
+        if total_items == 0 {
+            return Ok(0.0);
+        }
+
+        Ok((compliant_items as f64 / total_items as f64) * 100.0)
+    }
+
+    pub fn calculate_next_inspection_date(&self, asset_id: i64, inspection_type: InspectionType) -> AppResult<DateTime<Utc>> {
+        info!("Calculating next inspection date for asset: {} type: {}", asset_id, inspection_type);
+        let conn = self.database.get_connection()?;
+
+        // Get the last inspection date
+        let last_inspection: Option<DateTime<Utc>> = conn.query_row(
+            "SELECT MAX(actual_date) FROM inspections 
+             WHERE asset_id = ?1 AND inspection_type = ?2 AND status = 'Completed'",
+            params![asset_id, inspection_type.to_string()],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        self.database.return_connection(conn);
+
+        let base_date = last_inspection.unwrap_or_else(Utc::now);
+        
+        // Calculate next inspection based on type
+        let next_date = match inspection_type {
+            InspectionType::Frequent => base_date + chrono::Duration::days(30),  // Monthly
+            InspectionType::Periodic => base_date + chrono::Duration::days(365), // Yearly
+            InspectionType::Initial => base_date + chrono::Duration::days(1),    // Immediate
+            InspectionType::Special => base_date + chrono::Duration::days(90),   // Quarterly
+        };
+
+        Ok(next_date)
+    }
+
+    fn row_to_compliance_standard(&self, row: &Row) -> rusqlite::Result<ComplianceStandard> {
+        Ok(ComplianceStandard {
+            id: row.get(0)?,
+            standard_code: row.get(1)?,
+            standard_name: row.get(2)?,
+            version: row.get(3)?,
+            requirements: row.get::<_, Option<String>>(4)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            is_active: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
+    fn row_to_checklist_template(&self, row: &Row) -> rusqlite::Result<ComplianceChecklistTemplate> {
+        Ok(ComplianceChecklistTemplate {
+            id: row.get(0)?,
+            standard_id: row.get(1)?,
+            template_name: row.get(2)?,
+            inspection_type: row.get(3)?,
+            checklist_structure: serde_json::from_str(&row.get::<_, String>(4)?)
+                .unwrap_or(JsonValue::Null),
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    }
+}
+
+// =============================================================================
+// User Service
+// =============================================================================
+
+pub struct UserService {
+    database: Arc<Database>,
+}
+
+impl UserService {
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
+    }
+
+    pub fn create_user(&self, user: User) -> AppResult<User> {
+        info!("Creating new user: {}", user.username);
+        user.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO users (username, email, password_hash, role, first_name, last_name, phone, is_active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 RETURNING id",
+                params![
+                    user.username, user.email, user.password_hash, user.role.to_string(),
+                    user.first_name, user.last_name, user.phone, user.is_active
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("User created with ID: {}", id);
+            self.get_user_by_id(id)
+        })
+    }
+
+    pub fn get_user_by_id(&self, id: i64) -> AppResult<User> {
+        debug!("Fetching user by ID: {}", id);
+        let conn = self.database.get_connection()?;
+        
+        let user = conn.query_row(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users WHERE id = ?1",
+            params![id],
+            |row| self.row_to_user(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "User".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(user)
+    }
+
+    pub fn get_user_by_username(&self, username: String) -> AppResult<User> {
+        debug!("Fetching user by username: {}", username);
+        let conn = self.database.get_connection()?;
+        
+        let user = conn.query_row(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users WHERE username = ?1",
+            params![username],
+            |row| self.row_to_user(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "User".to_string(),
+            field: "username".to_string(),
+            value: username,
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(user)
+    }
+
+    pub fn get_user_by_email(&self, email: String) -> AppResult<User> {
+        debug!("Fetching user by email: {}", email);
+        let conn = self.database.get_connection()?;
+        
+        let user = conn.query_row(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users WHERE email = ?1",
+            params![email],
+            |row| self.row_to_user(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "User".to_string(),
+            field: "email".to_string(),
+            value: email,
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(user)
+    }
+
+    pub fn update_user(&self, id: i64, updates: UserUpdateData) -> AppResult<User> {
+        info!("Updating user: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            // Simple implementation - update individual fields
+            if let Some(username) = &updates.username {
+                conn.execute("UPDATE users SET username = ?1 WHERE id = ?2", params![username, id])?;
+            }
+            if let Some(email) = &updates.email {
+                conn.execute("UPDATE users SET email = ?1 WHERE id = ?2", params![email, id])?;
+            }
+            if let Some(role) = &updates.role {
+                conn.execute("UPDATE users SET role = ?1 WHERE id = ?2", params![role.to_string(), id])?;
+            }
+            if let Some(first_name) = &updates.first_name {
+                conn.execute("UPDATE users SET first_name = ?1 WHERE id = ?2", params![first_name, id])?;
+            }
+            if let Some(last_name) = &updates.last_name {
+                conn.execute("UPDATE users SET last_name = ?1 WHERE id = ?2", params![last_name, id])?;
+            }
+            if let Some(phone) = &updates.phone {
+                conn.execute("UPDATE users SET phone = ?1 WHERE id = ?2", params![phone, id])?;
+            }
+            if let Some(is_active) = &updates.is_active {
+                conn.execute("UPDATE users SET is_active = ?1 WHERE id = ?2", params![is_active, id])?;
+            }
+
+            debug!("User {} updated successfully", id);
+            self.get_user_by_id(id)
+        })
+    }
+
+    pub fn delete_user(&self, id: i64) -> AppResult<()> {
+        info!("Deleting user: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            let rows_affected = conn.execute("DELETE FROM users WHERE id = ?1", params![id])?;
+            
+            if rows_affected == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "User".to_string(),
+                    field: "id".to_string(),
+                    value: id.to_string(),
+                });
+            }
+            
+            debug!("User {} deleted successfully", id);
+            Ok(())
+        })
+    }
+
+    pub fn verify_password(&self, user_id: i64, password: String) -> AppResult<bool> {
+        debug!("Verifying password for user: {}", user_id);
+        let conn = self.database.get_connection()?;
+        
+        let password_hash: String = conn.query_row(
+            "SELECT password_hash FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get(0),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "User".to_string(),
+            field: "id".to_string(),
+            value: user_id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        
+        // Note: This is a placeholder - in a real implementation, use bcrypt::verify
+        Ok(bcrypt::verify(&password, &password_hash).unwrap_or(false))
+    }
+
+    pub fn update_password(&self, user_id: i64, new_password: String) -> AppResult<()> {
+        info!("Updating password for user: {}", user_id);
+        
+        // Note: This is a placeholder - in a real implementation, use bcrypt::hash
+        let password_hash = bcrypt::hash(&new_password, bcrypt::DEFAULT_COST)?;
+        
+        self.database.with_transaction(|conn| {
+            let rows_affected = conn.execute(
+                "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+                params![password_hash, user_id]
+            )?;
+            
+            if rows_affected == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "User".to_string(),
+                    field: "id".to_string(),
+                    value: user_id.to_string(),
+                });
+            }
+            
+            debug!("Password updated for user: {}", user_id);
+            Ok(())
+        })
+    }
+
+    pub fn get_users_by_role(&self, role: UserRole, filter: QueryFilter) -> AppResult<PaginatedResult<User>> {
+        info!("Fetching users by role: {}", role);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+
+        let mut stmt = conn.prepare(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users WHERE role = ?1 AND is_active = 1
+             ORDER BY last_name, first_name LIMIT ?2 OFFSET ?3"
+        )?;
+
+        let user_iter = stmt.query_map(params![role.to_string(), limit, offset], |row| self.row_to_user(row))?;
+
+        let mut users = Vec::new();
+        for user in user_iter {
+            users.push(user?);
+        }
+
+        let total_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE role = ?1 AND is_active = 1",
+            params![role.to_string()],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(users, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    fn row_to_user(&self, row: &Row) -> rusqlite::Result<User> {
+        Ok(User {
+            id: row.get(0)?,
+            username: row.get(1)?,
+            email: row.get(2)?,
+            password_hash: row.get(3)?,
+            role: row.get::<_, String>(4)?.parse().unwrap_or(UserRole::Inspector),
+            first_name: row.get(5)?,
+            last_name: row.get(6)?,
+            phone: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+            is_active: row.get(10)?,
+        })
+    }
+}
+
+// =============================================================================
+// Media Service
+// =============================================================================
+
+pub struct MediaService {
+    database: Arc<Database>,
+}
+
+impl MediaService {
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
+    }
+
+    pub fn create_media_file(&self, media: MediaFile) -> AppResult<MediaFile> {
+        info!("Creating new media file: {}", media.file_name);
+        media.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO media_files (inspection_id, component_id, file_name, file_path,
+                 file_type, mime_type, file_size, description, ai_analysis_metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 RETURNING id",
+                params![
+                    media.inspection_id, media.component_id, media.file_name, media.file_path,
+                    media.file_type.to_string(), media.mime_type, media.file_size,
+                    media.description,
+                    media.ai_analysis_metadata.as_ref().map(|m| m.to_string())
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("Media file created with ID: {}", id);
+            self.get_media_file_by_id(id)
+        })
+    }
+
+    pub fn get_media_file_by_id(&self, id: i64) -> AppResult<MediaFile> {
+        debug!("Fetching media file by ID: {}", id);
+        let conn = self.database.get_connection()?;
+        
+        let media_file = conn.query_row(
+            "SELECT id, inspection_id, component_id, file_name, file_path, file_type,
+             mime_type, file_size, description, ai_analysis_metadata, created_at
+             FROM media_files WHERE id = ?1",
+            params![id],
+            |row| self.row_to_media_file(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "MediaFile".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(media_file)
+    }
+
+    pub fn get_media_files_by_inspection(&self, inspection_id: i64) -> AppResult<Vec<MediaFile>> {
+        debug!("Fetching media files for inspection: {}", inspection_id);
+        let conn = self.database.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, inspection_id, component_id, file_name, file_path, file_type,
+             mime_type, file_size, description, ai_analysis_metadata, created_at
+             FROM media_files WHERE inspection_id = ?1 ORDER BY created_at DESC"
+        )?;
+
+        let media_iter = stmt.query_map(params![inspection_id], |row| self.row_to_media_file(row))?;
+
+        let mut media_files = Vec::new();
+        for media in media_iter {
+            media_files.push(media?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(media_files)
+    }
+
+    pub fn get_media_files_by_component(&self, component_id: i64) -> AppResult<Vec<MediaFile>> {
+        debug!("Fetching media files for component: {}", component_id);
+        let conn = self.database.get_connection()?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, inspection_id, component_id, file_name, file_path, file_type,
+             mime_type, file_size, description, ai_analysis_metadata, created_at
+             FROM media_files WHERE component_id = ?1 ORDER BY created_at DESC"
+        )?;
+
+        let media_iter = stmt.query_map(params![component_id], |row| self.row_to_media_file(row))?;
+
+        let mut media_files = Vec::new();
+        for media in media_iter {
+            media_files.push(media?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(media_files)
+    }
+
+    pub fn update_media_file(&self, id: i64, updates: MediaFileUpdateData) -> AppResult<MediaFile> {
+        info!("Updating media file: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            // Simple implementation - update individual fields
+            if let Some(file_name) = &updates.file_name {
+                conn.execute("UPDATE media_files SET file_name = ?1 WHERE id = ?2", params![file_name, id])?;
+            }
+            if let Some(description) = &updates.description {
+                conn.execute("UPDATE media_files SET description = ?1 WHERE id = ?2", params![description, id])?;
+            }
+            if let Some(ai_analysis_metadata) = &updates.ai_analysis_metadata {
+                conn.execute("UPDATE media_files SET ai_analysis_metadata = ?1 WHERE id = ?2", params![ai_analysis_metadata.to_string(), id])?;
+            }
+
+            debug!("Media file {} updated successfully", id);
+            self.get_media_file_by_id(id)
+        })
+    }
+
+    pub fn delete_media_file(&self, id: i64) -> AppResult<()> {
+        info!("Deleting media file: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            let rows_affected = conn.execute("DELETE FROM media_files WHERE id = ?1", params![id])?;
+            
+            if rows_affected == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "MediaFile".to_string(),
+                    field: "id".to_string(),
+                    value: id.to_string(),
+                });
+            }
+            
+            debug!("Media file {} deleted successfully", id);
+            Ok(())
+        })
+    }
+
+    pub fn queue_for_ai_analysis(&self, media_file_id: i64) -> AppResult<()> {
+        info!("Queueing media file {} for AI analysis", media_file_id);
+        
+        // This is a stub implementation - in a real system, this would:
+        // 1. Add the media file to an AI processing queue
+        // 2. Create a pending AI model result record
+        // 3. Trigger the AI processing pipeline
+        
+        self.database.with_transaction(|conn| {
+            // Create a pending AI analysis record
+            conn.execute(
+                "INSERT INTO ai_model_results (media_file_id, model_name, model_version,
+                 predictions, confidence_score, status)
+                 VALUES (?1, 'vision_model_v1', '1.0', '{}', 0.0, 'Pending')",
+                params![media_file_id]
+            )?;
+            
+            debug!("Media file {} queued for AI analysis", media_file_id);
+            Ok(())
+        })
+    }
+
+    fn row_to_media_file(&self, row: &Row) -> rusqlite::Result<MediaFile> {
+        Ok(MediaFile {
+            id: row.get(0)?,
+            inspection_id: row.get(1)?,
+            component_id: row.get(2)?,
+            file_name: row.get(3)?,
+            file_path: row.get(4)?,
+            file_type: row.get::<_, String>(5)?.parse().unwrap_or(MediaType::Image),
+            mime_type: row.get(6)?,
+            file_size: row.get(7)?,
+            description: row.get(8)?,
+            ai_analysis_metadata: row.get::<_, Option<String>>(9)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: row.get(10)?,
+        })
+    }
+}
+
+// =============================================================================
+// Report Service
+// =============================================================================
+
+pub struct ReportService {
+    database: Arc<Database>,
+}
+
+impl ReportService {
+    pub fn new(database: Arc<Database>) -> Self {
+        Self { database }
+    }
+
+    pub fn generate_asset_summary_report(&self, asset_id: i64) -> AppResult<AssetSummaryReport> {
+        info!("Generating asset summary report for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        // Get asset basic info
+        let (asset_name, _asset_status): (String, String) = conn.query_row(
+            "SELECT asset_name, status FROM assets WHERE id = ?1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Asset".to_string(),
+            field: "id".to_string(),
+            value: asset_id.to_string(),
+        })?;
+
+        // Get inspection counts
+        let (total_inspections, completed_inspections, pending_inspections): (i64, i64, i64) = conn.query_row(
+            "SELECT
+                COUNT(*) as total,
+                COUNT(CASE WHEN status = 'Completed' THEN 1 END) as completed,
+                COUNT(CASE WHEN status IN ('Scheduled', 'In Progress') THEN 1 END) as pending
+             FROM inspections WHERE asset_id = ?1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        // Get last inspection date and condition
+        let (last_inspection_date, overall_condition): (Option<DateTime<Utc>>, Option<String>) = conn.query_row(
+            "SELECT actual_date, overall_condition FROM inspections
+             WHERE asset_id = ?1 AND status = 'Completed'
+             ORDER BY actual_date DESC LIMIT 1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap_or((None, None));
+
+        // Get maintenance record count
+        let maintenance_records: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM maintenance_records WHERE asset_id = ?1",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        // Calculate compliance score (average of all completed inspections)
+        let compliance_score: f64 = if completed_inspections > 0 {
+            let mut total_score = 0.0;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM inspections WHERE asset_id = ?1 AND status = 'Completed'"
+            )?;
+            let inspection_iter = stmt.query_map(params![asset_id], |row| row.get::<_, i64>(0))?;
+            
+            for inspection_result in inspection_iter {
+                let inspection_id = inspection_result?;
+                // Calculate compliance score for this inspection
+                let (total_items, compliant_items): (i64, i64) = conn.query_row(
+                    "SELECT
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN is_compliant = 1 THEN 1 END) as compliant
+                     FROM inspection_items WHERE inspection_id = ?1",
+                    params![inspection_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                
+                if total_items > 0 {
+                    total_score += (compliant_items as f64 / total_items as f64) * 100.0;
+                }
+            }
+            total_score / completed_inspections as f64
+        } else {
+            0.0
+        };
+
+        // Calculate next inspection date (placeholder logic)
+        let next_inspection_date = last_inspection_date
+            .map(|date| date + chrono::Duration::days(365)) // Assume yearly inspections
+            .or_else(|| Some(Utc::now() + chrono::Duration::days(30)));
+
+        self.database.return_connection(conn);
+
+        Ok(AssetSummaryReport {
+            asset_id,
+            asset_name,
+            total_inspections,
+            completed_inspections,
+            pending_inspections,
+            last_inspection_date,
+            next_inspection_date,
+            overall_condition: overall_condition.and_then(|s| s.parse().ok()),
+            maintenance_records,
+            compliance_score,
+        })
+    }
+
+    pub fn generate_inspection_completion_report(&self, start_date: DateTime<Utc>, end_date: DateTime<Utc>) -> AppResult<InspectionCompletionReport> {
+        info!("Generating inspection completion report from {} to {}", start_date, end_date);
+        let conn = self.database.get_connection()?;
+
+        // Get total scheduled and completed inspections
+        let (total_scheduled, total_completed): (i64, i64) = conn.query_row(
+            "SELECT
+                COUNT(*) as scheduled,
+                COUNT(CASE WHEN status = 'Completed' THEN 1 END) as completed
+             FROM inspections
+             WHERE scheduled_date BETWEEN ?1 AND ?2",
+            params![start_date, end_date],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        let completion_rate = if total_scheduled > 0 {
+            (total_completed as f64 / total_scheduled as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Get inspections by inspector
+        let mut by_inspector = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT u.first_name || ' ' || u.last_name as inspector_name, COUNT(*) as count
+             FROM inspections i
+             JOIN users u ON i.inspector_id = u.id
+             WHERE i.scheduled_date BETWEEN ?1 AND ?2 AND i.status = 'Completed'
+             GROUP BY i.inspector_id, inspector_name"
+        )?;
+
+        let inspector_iter = stmt.query_map(params![start_date, end_date], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        for result in inspector_iter {
+            let (inspector_name, count) = result?;
+            by_inspector.insert(inspector_name, count);
+        }
+
+        drop(stmt);
+
+        // Get inspections by asset type
+        let mut by_asset_type = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT a.asset_type, COUNT(*) as count
+             FROM inspections i
+             JOIN assets a ON i.asset_id = a.id
+             WHERE i.scheduled_date BETWEEN ?1 AND ?2 AND i.status = 'Completed'
+             GROUP BY a.asset_type"
+        )?;
+
+        let asset_type_iter = stmt.query_map(params![start_date, end_date], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+
+        for result in asset_type_iter {
+            let (asset_type, count) = result?;
+            by_asset_type.insert(asset_type, count);
+        }
+
+        drop(stmt);
+
+        // Calculate average completion time
+        let average_completion_time_hours: f64 = conn.query_row(
+            "SELECT AVG(
+                CASE
+                    WHEN scheduled_date IS NOT NULL AND actual_date IS NOT NULL
+                    THEN (julianday(actual_date) - julianday(scheduled_date)) * 24
+                    ELSE 0
+                END
+             ) FROM inspections
+             WHERE scheduled_date BETWEEN ?1 AND ?2 AND status = 'Completed'",
+            params![start_date, end_date],
+            |row| row.get(0),
+        ).unwrap_or(0.0);
+
+        self.database.return_connection(conn);
+
+        Ok(InspectionCompletionReport {
+            period_start: start_date,
+            period_end: end_date,
+            total_scheduled,
+            total_completed,
+            completion_rate,
+            by_inspector,
+            by_asset_type,
+            average_completion_time_hours,
+        })
+    }
+
+    pub fn generate_compliance_status_report(&self, location_id: Option<i64>) -> AppResult<ComplianceStatusReport> {
+        info!("Generating compliance status report for location: {:?}", location_id);
+        let conn = self.database.get_connection()?;
+
+        // Get total assets
+        let total_assets: i64 = if let Some(loc_id) = location_id {
+            conn.query_row(
+                "SELECT COUNT(*) FROM assets a WHERE a.location_id = ?1",
+                params![loc_id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM assets a",
+                [],
+                |row| row.get(0),
+            )?
+        };
+
+        // Get assets with recent inspections and their compliance status
+        let (assets_with_inspections, compliant_assets): (i64, i64) = if let Some(loc_id) = location_id {
+            conn.query_row(
+                "SELECT
+                    COUNT(DISTINCT a.id) as total_with_inspections,
+                    COUNT(DISTINCT CASE
+                        WHEN recent_inspections.compliance_score >= 80 THEN a.id
+                    END) as compliant_assets
+                 FROM assets a
+                 LEFT JOIN (
+                     SELECT
+                         i.asset_id,
+                         AVG(compliance_scores.score) as compliance_score
+                     FROM inspections i
+                     LEFT JOIN (
+                         SELECT
+                             inspection_id,
+                             (COUNT(CASE WHEN is_compliant = 1 THEN 1 END) * 100.0 / COUNT(*)) as score
+                         FROM inspection_items
+                         GROUP BY inspection_id
+                     ) compliance_scores ON i.id = compliance_scores.inspection_id
+                     WHERE i.status = 'Completed'
+                     GROUP BY i.asset_id
+                 ) recent_inspections ON a.id = recent_inspections.asset_id
+                 WHERE a.location_id = ?1",
+                params![loc_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT
+                    COUNT(DISTINCT a.id) as total_with_inspections,
+                    COUNT(DISTINCT CASE
+                        WHEN recent_inspections.compliance_score >= 80 THEN a.id
+                    END) as compliant_assets
+                 FROM assets a
+                 LEFT JOIN (
+                     SELECT
+                         i.asset_id,
+                         AVG(compliance_scores.score) as compliance_score
+                     FROM inspections i
+                     LEFT JOIN (
+                         SELECT
+                             inspection_id,
+                             (COUNT(CASE WHEN is_compliant = 1 THEN 1 END) * 100.0 / COUNT(*)) as score
+                         FROM inspection_items
+                         GROUP BY inspection_id
+                     ) compliance_scores ON i.id = compliance_scores.inspection_id
+                     WHERE i.status = 'Completed'
+                     GROUP BY i.asset_id
+                 ) recent_inspections ON a.id = recent_inspections.asset_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?
+        };
+
+        let non_compliant_assets = assets_with_inspections - compliant_assets;
+        let compliance_percentage = if assets_with_inspections > 0 {
+            (compliant_assets as f64 / assets_with_inspections as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Get overdue inspections
+        let overdue_inspections: i64 = if let Some(loc_id) = location_id {
+            conn.query_row(
+                "SELECT COUNT(DISTINCT a.id)
+                 FROM assets a
+                 LEFT JOIN inspections i ON a.id = i.asset_id
+                 WHERE (i.scheduled_date < datetime('now') AND i.status NOT IN ('Completed', 'Cancelled'))
+                    OR (i.id IS NULL)  -- Assets with no inspections
+                 AND a.location_id = ?1",
+                params![loc_id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(DISTINCT a.id)
+                 FROM assets a
+                 LEFT JOIN inspections i ON a.id = i.asset_id
+                 WHERE (i.scheduled_date < datetime('now') AND i.status NOT IN ('Completed', 'Cancelled'))
+                    OR (i.id IS NULL)",
+                [],
+                |row| row.get(0),
+            )?
+        };
+
+        // Get critical findings
+        let critical_findings: i64 = if let Some(loc_id) = location_id {
+            conn.query_row(
+                "SELECT COUNT(*)
+                 FROM inspection_items ii
+                 JOIN inspections i ON ii.inspection_id = i.id
+                 JOIN assets a ON i.asset_id = a.id
+                 WHERE ii.severity = 'Critical' AND i.status = 'Completed'
+                 AND a.location_id = ?1",
+                params![loc_id],
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*)
+                 FROM inspection_items ii
+                 JOIN inspections i ON ii.inspection_id = i.id
+                 JOIN assets a ON i.asset_id = a.id
+                 WHERE ii.severity = 'Critical' AND i.status = 'Completed'",
+                [],
+                |row| row.get(0),
+            )?
+        };
+
+        // Get compliance by standard
+        let mut by_standard = HashMap::new();
+        let stmt = if let Some(loc_id) = location_id {
+            let mut stmt = conn.prepare(
+                "SELECT
+                    i.compliance_standard,
+                    COUNT(DISTINCT a.id) as total_assets,
+                    COUNT(DISTINCT CASE
+                        WHEN compliance_scores.score >= 80 THEN a.id
+                    END) as compliant
+                 FROM assets a
+                 JOIN inspections i ON a.id = i.asset_id
+                 LEFT JOIN (
+                     SELECT
+                         inspection_id,
+                         (COUNT(CASE WHEN is_compliant = 1 THEN 1 END) * 100.0 / COUNT(*)) as score
+                     FROM inspection_items
+                     GROUP BY inspection_id
+                 ) compliance_scores ON i.id = compliance_scores.inspection_id
+                 WHERE i.status = 'Completed' AND a.location_id = ?1
+                 GROUP BY i.compliance_standard"
+            )?;
+            let standard_iter = stmt.query_map(params![loc_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            for result in standard_iter {
+                let (standard_code, total, compliant) = result?;
+                let compliance_rate = if total > 0 {
+                    (compliant as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                by_standard.insert(standard_code.clone(), ComplianceStandardStatus {
+                    standard_code,
+                    total_assets: total,
+                    compliant,
+                    compliance_rate,
+                });
+            }
+            stmt
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT
+                    i.compliance_standard,
+                    COUNT(DISTINCT a.id) as total_assets,
+                    COUNT(DISTINCT CASE
+                        WHEN compliance_scores.score >= 80 THEN a.id
+                    END) as compliant
+                 FROM assets a
+                 JOIN inspections i ON a.id = i.asset_id
+                 LEFT JOIN (
+                     SELECT
+                         inspection_id,
+                         (COUNT(CASE WHEN is_compliant = 1 THEN 1 END) * 100.0 / COUNT(*)) as score
+                     FROM inspection_items
+                     GROUP BY inspection_id
+                 ) compliance_scores ON i.id = compliance_scores.inspection_id
+                 WHERE i.status = 'Completed'
+                 GROUP BY i.compliance_standard"
+            )?;
+            let standard_iter = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?;
+            for result in standard_iter {
+                let (standard_code, total, compliant) = result?;
+                let compliance_rate = if total > 0 {
+                    (compliant as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                };
+                
+                by_standard.insert(standard_code.clone(), ComplianceStandardStatus {
+                    standard_code,
+                    total_assets: total,
+                    compliant,
+                    compliance_rate,
+                });
+            }
+            stmt
+        };
+
+        drop(stmt);
+        self.database.return_connection(conn);
+
+        Ok(ComplianceStatusReport {
+            location_id,
+            total_assets,
+            compliant_assets,
+            non_compliant_assets,
+            overdue_inspections,
+            compliance_percentage,
+            critical_findings,
+            by_standard,
+        })
+    }
+
+    pub fn generate_maintenance_history_report(&self, asset_id: i64) -> AppResult<MaintenanceHistoryReport> {
+        info!("Generating maintenance history report for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        // Get asset name
+        let asset_name: String = conn.query_row(
+            "SELECT asset_name FROM assets WHERE id = ?1",
+            params![asset_id],
+            |row| row.get(0),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Asset".to_string(),
+            field: "id".to_string(),
+            value: asset_id.to_string(),
+        })?;
+
+        // Get maintenance statistics
+        let (total_maintenance_records, preventive_maintenance, corrective_maintenance, emergency_maintenance): (i64, i64, i64, i64) = conn.query_row(
+            "SELECT
+                COUNT(*) as total,
+                COUNT(CASE WHEN maintenance_type = 'Preventive' THEN 1 END) as preventive,
+                COUNT(CASE WHEN maintenance_type = 'Corrective' THEN 1 END) as corrective,
+                COUNT(CASE WHEN maintenance_type = 'Emergency' THEN 1 END) as emergency
+             FROM maintenance_records WHERE asset_id = ?1 AND status = 'Completed'",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+
+        // Get cost statistics
+        let (total_cost, average_cost_per_maintenance): (f64, f64) = conn.query_row(
+            "SELECT
+                COALESCE(SUM(cost), 0.0) as total_cost,
+                COALESCE(AVG(cost), 0.0) as average_cost
+             FROM maintenance_records
+             WHERE asset_id = ?1 AND status = 'Completed' AND cost IS NOT NULL",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+
+        // Get last maintenance date
+        let last_maintenance_date: Option<DateTime<Utc>> = conn.query_row(
+            "SELECT MAX(completed_date) FROM maintenance_records
+             WHERE asset_id = ?1 AND status = 'Completed'",
+            params![asset_id],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        // Get next scheduled maintenance
+        let next_scheduled_maintenance: Option<DateTime<Utc>> = conn.query_row(
+            "SELECT MIN(scheduled_date) FROM maintenance_records
+             WHERE asset_id = ?1 AND status = 'Scheduled' AND scheduled_date > datetime('now')",
+            params![asset_id],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        self.database.return_connection(conn);
+
+        Ok(MaintenanceHistoryReport {
+            asset_id,
+            asset_name,
+            total_maintenance_records,
+            preventive_maintenance,
+            corrective_maintenance,
+            emergency_maintenance,
+            total_cost,
+            average_cost_per_maintenance,
+            last_maintenance_date,
+            next_scheduled_maintenance,
+        })
+    }
+}
+
+// =============================================================================
+// Main Services Struct
+// =============================================================================
+
+pub struct Services {
+    pub assets: AssetService,
+    pub inspections: InspectionService,
+    pub compliance: ComplianceService,
+    pub users: UserService,
+    pub media: MediaService,
+    pub reports: ReportService,
+}
+
+impl Services {
+    pub async fn init(database: Arc<Database>) -> AppResult<Self> {
+        info!("Initializing services layer");
+        
+        let assets = AssetService::new(database.clone());
+        let inspections = InspectionService::new(database.clone());
+        let compliance = ComplianceService::new(database.clone());
+        let users = UserService::new(database.clone());
+        let media = MediaService::new(database.clone());
+        let reports = ReportService::new(database.clone());
+        
+        info!("Services layer initialized successfully");
+        Ok(Services {
+            assets,
+            inspections,
+            compliance,
+            users,
+            media,
+            reports,
+        })
+    }
+}

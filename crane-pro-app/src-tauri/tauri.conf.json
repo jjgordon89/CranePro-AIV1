@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "crane-pro-app",
+  "productName": "CranePro Bridge Inspection",
   "version": "0.1.0",
-  "identifier": "com.crane-pro-app.app",
+  "identifier": "com.blueorigin.cranepro.inspection",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,13 +12,26 @@
   "app": {
     "windows": [
       {
-        "title": "crane-pro-app",
-        "width": 800,
-        "height": 600
+        "title": "CranePro - Bridge Inspection",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1200,
+        "minHeight": 800,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "center": true,
+        "fullscreen": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'unsafe-eval'",
+      "dangerousDisableAssetCspModification": false,
+      "freezePrototype": true,
+      "pattern": {
+        "use": "brownfield"
+      }
     }
   },
   "bundle": {
@@ -30,6 +43,33 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Productivity",
+    "shortDescription": "Bridge crane inspection and maintenance tracking application",
+    "longDescription": "Professional bridge crane inspection application for industrial maintenance teams. Features comprehensive inspection checklists, photo documentation, report generation, and maintenance scheduling."
+  },
+  "plugins": {
+    "fs": {
+      "scope": [
+        {
+          "allow": [
+            "$APPDATA/cranepro/**",
+            "$DOCUMENT/**",
+            "$DOWNLOAD/**",
+            "$DESKTOP/**"
+          ]
+        }
+      ]
+    },
+    "dialog": {
+      "open": true,
+      "save": true,
+      "message": true,
+      "ask": true,
+      "confirm": true
+    },
+    "shell": {
+      "open": "^https://|^mailto:|^tel:"
+    }
   }
 }
