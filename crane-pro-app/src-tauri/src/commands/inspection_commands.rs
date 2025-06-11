@@ -6,12 +6,12 @@
 use crate::api::{ApiResponse, QueryFilterRequest, CreateInspectionRequest, InspectionUpdateRequest,
                 CreateInspectionItemRequest, InspectionItemUpdateRequest, PaginatedResponse};
 use crate::commands::AppState;
-use crate::middleware::{Permissions, auth::AuthHelper};
-use crate::models::{Inspection, InspectionItem, PaginatedResult};
+use crate::middleware::auth::AuthHelper;
+use crate::models::{Inspection, InspectionItem};
 use crate::services::{InspectionUpdateData, InspectionItemUpdateData};
-use crate::{require_auth, require_resource_access, time_command, command_handler};
+use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
-use log::{info, debug, error};
+use log::{info, debug};
 
 /// Create a new inspection
 #[tauri::command]

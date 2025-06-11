@@ -85,6 +85,33 @@ pub struct UserUpdateData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserSearchCriteria {
+    pub username: Option<String>,
+    pub email: Option<String>,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub role: Option<UserRole>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PasswordStrengthResult {
+    pub is_valid: bool,
+    pub score: u8, // 0-100
+    pub issues: Vec<String>,
+    pub suggestions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountLockoutInfo {
+    pub user_id: i64,
+    pub failed_attempts: i32,
+    pub locked_at: Option<DateTime<Utc>>,
+    pub locked_until: Option<DateTime<Utc>>,
+    pub is_locked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaFileUpdateData {
     pub file_name: Option<String>,
     pub description: Option<String>,
@@ -1036,9 +1063,46 @@ impl UserService {
         Self { database }
     }
 
-    pub fn create_user(&self, user: User) -> AppResult<User> {
+    /// Create a new user with plain text password that will be hashed
+    ///
+    /// # Arguments
+    /// * `user` - User object with plain text password in password_hash field
+    /// * `plain_password` - The plain text password to hash
+    pub fn create_user(&self, mut user: User, plain_password: String) -> AppResult<User> {
         info!("Creating new user: {}", user.username);
         user.validate()?;
+
+        // Validate password strength before proceeding
+        let password_validation = self.validate_password_strength(&plain_password)?;
+        if !password_validation.is_valid {
+            return Err(AppError::validation(
+                "password",
+                format!("Password does not meet strength requirements: {}",
+                    password_validation.issues.join(", "))
+            ));
+        }
+
+        // Check for email uniqueness
+        if self.email_exists(&user.email)? {
+            return Err(AppError::DuplicateRecord {
+                entity: "User".to_string(),
+                field: "email".to_string(),
+                value: user.email.clone(),
+            });
+        }
+
+        // Check for username uniqueness
+        if self.username_exists(&user.username)? {
+            return Err(AppError::DuplicateRecord {
+                entity: "User".to_string(),
+                field: "username".to_string(),
+                value: user.username.clone(),
+            });
+        }
+
+        // Hash the password
+        let password_hash = bcrypt::hash(&plain_password, bcrypt::DEFAULT_COST)?;
+        user.password_hash = password_hash;
 
         self.database.with_transaction(|conn| {
             let id = conn.query_row(
@@ -1053,6 +1117,7 @@ impl UserService {
             )?;
 
             debug!("User created with ID: {}", id);
+            info!("User {} created successfully with proper password hashing", user.username);
             self.get_user_by_id(id)
         })
     }
@@ -1168,14 +1233,24 @@ impl UserService {
         })
     }
 
+    /// Verify a user's password using bcrypt
+    ///
+    /// # Arguments
+    /// * `user_id` - The user's ID
+    /// * `password` - The plain text password to verify
+    ///
+    /// # Returns
+    /// * `Ok(true)` if password matches
+    /// * `Ok(false)` if password doesn't match
+    /// * `Err` if user not found or other error
     pub fn verify_password(&self, user_id: i64, password: String) -> AppResult<bool> {
         debug!("Verifying password for user: {}", user_id);
         let conn = self.database.get_connection()?;
         
-        let password_hash: String = conn.query_row(
-            "SELECT password_hash FROM users WHERE id = ?1",
+        let (password_hash, is_active): (String, bool) = conn.query_row(
+            "SELECT password_hash, is_active FROM users WHERE id = ?1",
             params![user_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         ).map_err(|_| AppError::RecordNotFound {
             entity: "User".to_string(),
             field: "id".to_string(),
@@ -1184,19 +1259,75 @@ impl UserService {
 
         self.database.return_connection(conn);
         
-        // Note: This is a placeholder - in a real implementation, use bcrypt::verify
-        Ok(bcrypt::verify(&password, &password_hash).unwrap_or(false))
+        // Check if user account is active
+        if !is_active {
+            return Err(AppError::Authentication {
+                reason: "User account is inactive".to_string(),
+            });
+        }
+
+        // Verify password using bcrypt
+        match bcrypt::verify(&password, &password_hash) {
+            Ok(is_valid) => {
+                if is_valid {
+                    debug!("Password verification successful for user: {}", user_id);
+                } else {
+                    debug!("Password verification failed for user: {}", user_id);
+                }
+                Ok(is_valid)
+            }
+            Err(e) => {
+                debug!("Password verification error for user {}: {}", user_id, e);
+                Err(AppError::Authentication {
+                    reason: "Password verification failed".to_string(),
+                })
+            }
+        }
     }
 
+    /// Update a user's password with validation and proper hashing
+    ///
+    /// # Arguments
+    /// * `user_id` - The user's ID
+    /// * `new_password` - The new plain text password
     pub fn update_password(&self, user_id: i64, new_password: String) -> AppResult<()> {
         info!("Updating password for user: {}", user_id);
         
-        // Note: This is a placeholder - in a real implementation, use bcrypt::hash
+        // Validate password strength
+        let password_validation = self.validate_password_strength(&new_password)?;
+        if !password_validation.is_valid {
+            return Err(AppError::validation(
+                "password",
+                format!("New password does not meet strength requirements: {}",
+                    password_validation.issues.join(", "))
+            ));
+        }
+
+        // Check if user exists and is active
+        let conn = self.database.get_connection()?;
+        let is_active: bool = conn.query_row(
+            "SELECT is_active FROM users WHERE id = ?1",
+            params![user_id],
+            |row| row.get(0),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "User".to_string(),
+            field: "id".to_string(),
+            value: user_id.to_string(),
+        })?;
+        self.database.return_connection(conn);
+
+        if !is_active {
+            return Err(AppError::Authentication {
+                reason: "Cannot update password for inactive user".to_string(),
+            });
+        }
+        
+        // Hash the new password
         let password_hash = bcrypt::hash(&new_password, bcrypt::DEFAULT_COST)?;
         
         self.database.with_transaction(|conn| {
             let rows_affected = conn.execute(
-                "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+                "UPDATE users SET password_hash = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
                 params![password_hash, user_id]
             )?;
             
@@ -1208,7 +1339,8 @@ impl UserService {
                 });
             }
             
-            debug!("Password updated for user: {}", user_id);
+            debug!("Password updated successfully for user: {}", user_id);
+            info!("Password updated for user: {} with proper validation and hashing", user_id);
             Ok(())
         })
     }
@@ -1243,6 +1375,391 @@ impl UserService {
         drop(stmt);
         self.database.return_connection(conn);
         Ok(PaginatedResult::new(users, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    /// Validate password strength according to security requirements
+    ///
+    /// # Arguments
+    /// * `password` - The plain text password to validate
+    ///
+    /// # Returns
+    /// * `PasswordStrengthResult` with validation details
+    pub fn validate_password_strength(&self, password: &str) -> AppResult<PasswordStrengthResult> {
+        let mut issues = Vec::new();
+        let mut suggestions = Vec::new();
+        let mut score = 0u8;
+
+        // Check minimum length
+        if password.len() >= 8 {
+            score += 20;
+        } else {
+            issues.push("Password must be at least 8 characters long".to_string());
+            suggestions.push("Use at least 8 characters".to_string());
+        }
+
+        // Check for uppercase letter
+        if password.chars().any(|c| c.is_uppercase()) {
+            score += 20;
+        } else {
+            issues.push("Password must contain at least one uppercase letter".to_string());
+            suggestions.push("Add an uppercase letter (A-Z)".to_string());
+        }
+
+        // Check for lowercase letter
+        if password.chars().any(|c| c.is_lowercase()) {
+            score += 20;
+        } else {
+            issues.push("Password must contain at least one lowercase letter".to_string());
+            suggestions.push("Add a lowercase letter (a-z)".to_string());
+        }
+
+        // Check for number
+        if password.chars().any(|c| c.is_numeric()) {
+            score += 20;
+        } else {
+            issues.push("Password must contain at least one number".to_string());
+            suggestions.push("Add a number (0-9)".to_string());
+        }
+
+        // Check for special character
+        if password.chars().any(|c| "!@#$%^&*()_+-=[]{}|;:,.<>?".contains(c)) {
+            score += 20;
+        } else {
+            issues.push("Password must contain at least one special character".to_string());
+            suggestions.push("Add a special character (!@#$%^&*()_+-=[]{}|;:,.<>?)".to_string());
+        }
+
+        // Additional strength checks
+        if password.len() >= 12 {
+            score = score.saturating_add(10);
+        }
+        if password.chars().filter(|c| c.is_uppercase()).count() >= 2 {
+            score = score.saturating_add(5);
+        }
+        if password.chars().filter(|c| c.is_numeric()).count() >= 2 {
+            score = score.saturating_add(5);
+        }
+
+        let is_valid = issues.is_empty();
+        
+        debug!("Password strength validation: score={}, valid={}, issues={:?}", score, is_valid, issues);
+        
+        Ok(PasswordStrengthResult {
+            is_valid,
+            score,
+            issues,
+            suggestions,
+        })
+    }
+
+    /// Check if an email already exists in the database
+    ///
+    /// # Arguments
+    /// * `email` - The email to check
+    ///
+    /// # Returns
+    /// * `true` if email exists, `false` otherwise
+    pub fn email_exists(&self, email: &str) -> AppResult<bool> {
+        let conn = self.database.get_connection()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER(?1)",
+            params![email],
+            |row| row.get(0),
+        )?;
+        self.database.return_connection(conn);
+        Ok(count > 0)
+    }
+
+    /// Check if a username already exists in the database
+    ///
+    /// # Arguments
+    /// * `username` - The username to check
+    ///
+    /// # Returns
+    /// * `true` if username exists, `false` otherwise
+    pub fn username_exists(&self, username: &str) -> AppResult<bool> {
+        let conn = self.database.get_connection()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users WHERE LOWER(username) = LOWER(?1)",
+            params![username],
+            |row| row.get(0),
+        )?;
+        self.database.return_connection(conn);
+        Ok(count > 0)
+    }
+
+    /// Get all users with pagination support
+    ///
+    /// # Arguments
+    /// * `filter` - Query filter with pagination parameters
+    ///
+    /// # Returns
+    /// * `PaginatedResult<User>` with users and pagination metadata
+    pub fn get_all_users(&self, filter: QueryFilter) -> AppResult<PaginatedResult<User>> {
+        info!("Fetching all users with filter: {:?}", filter);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+        let sort_order = filter.sort_order.unwrap_or(SortOrder::Desc);
+        let sort_by = filter.sort_by.unwrap_or("created_at".to_string());
+
+        // Build the ORDER BY clause
+        let order_by = format!(" ORDER BY {} {}", sort_by, sort_order);
+
+        let query = format!(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users {} LIMIT {} OFFSET {}",
+            order_by, limit, offset
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let user_iter = stmt.query_map([], |row| self.row_to_user(row))?;
+
+        let mut users = Vec::new();
+        for user in user_iter {
+            users.push(user?);
+        }
+
+        // Get total count
+        let total_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM users",
+            [],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(users, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    /// Search users by various criteria
+    ///
+    /// # Arguments
+    /// * `criteria` - Search criteria
+    /// * `filter` - Query filter with pagination parameters
+    ///
+    /// # Returns
+    /// * `PaginatedResult<User>` with matching users and pagination metadata
+    pub fn search_users(&self, criteria: UserSearchCriteria, filter: QueryFilter) -> AppResult<PaginatedResult<User>> {
+        info!("Searching users with criteria: {:?}", criteria);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+        let sort_order = filter.sort_order.unwrap_or(SortOrder::Desc);
+        let sort_by = filter.sort_by.unwrap_or("created_at".to_string());
+
+        // Build WHERE conditions
+        let mut where_conditions = Vec::new();
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+        
+        // Create owned values for parameters to avoid lifetime issues
+        let mut owned_params: Vec<String> = Vec::new();
+
+        if let Some(ref username) = criteria.username {
+            where_conditions.push("username LIKE ?");
+            owned_params.push(format!("%{}%", username));
+        }
+        if let Some(ref email) = criteria.email {
+            where_conditions.push("email LIKE ?");
+            owned_params.push(format!("%{}%", email));
+        }
+        if let Some(ref first_name) = criteria.first_name {
+            where_conditions.push("first_name LIKE ?");
+            owned_params.push(format!("%{}%", first_name));
+        }
+        if let Some(ref last_name) = criteria.last_name {
+            where_conditions.push("last_name LIKE ?");
+            owned_params.push(format!("%{}%", last_name));
+        }
+        if let Some(ref role) = criteria.role {
+            where_conditions.push("role = ?");
+            owned_params.push(role.to_string());
+        }
+        if let Some(is_active) = criteria.is_active {
+            where_conditions.push("is_active = ?");
+            owned_params.push(is_active.to_string());
+        }
+        
+        // Now create references to the owned values
+        for param in &owned_params {
+            params.push(param);
+        }
+
+        let where_clause = if where_conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", where_conditions.join(" AND "))
+        };
+
+        let order_by = format!(" ORDER BY {} {}", sort_by, sort_order);
+
+        let query = format!(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users{} {} LIMIT {} OFFSET {}",
+            where_clause, order_by, limit, offset
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let user_iter = stmt.query_map(params.as_slice(), |row| self.row_to_user(row))?;
+
+        let mut users = Vec::new();
+        for user in user_iter {
+            users.push(user?);
+        }
+
+        // Get total count with same WHERE conditions
+        let count_query = format!("SELECT COUNT(*) FROM users{}", where_clause);
+        let mut count_stmt = conn.prepare(&count_query)?;
+        let total_count: i64 = count_stmt.query_row(params.as_slice(), |row| row.get(0))?;
+
+        drop(stmt);
+        drop(count_stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(users, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    /// Enhanced get_users_by_role with better filtering
+    ///
+    /// # Arguments
+    /// * `role` - The user role to filter by
+    /// * `filter` - Query filter with pagination parameters
+    /// * `include_inactive` - Whether to include inactive users
+    ///
+    /// # Returns
+    /// * `PaginatedResult<User>` with users of the specified role
+    pub fn get_users_by_role_enhanced(&self, role: UserRole, filter: QueryFilter, include_inactive: bool) -> AppResult<PaginatedResult<User>> {
+        info!("Fetching users by role: {} (include_inactive: {})", role, include_inactive);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+        let sort_order = filter.sort_order.unwrap_or(SortOrder::Desc);
+        let sort_by = filter.sort_by.unwrap_or("last_name".to_string());
+
+        let where_clause = if include_inactive {
+            "WHERE role = ?"
+        } else {
+            "WHERE role = ? AND is_active = 1"
+        };
+
+        let order_by = format!(" ORDER BY {} {}", sort_by, sort_order);
+
+        let query = format!(
+            "SELECT id, username, email, password_hash, role, first_name, last_name, phone,
+             created_at, updated_at, is_active
+             FROM users {} {} LIMIT {} OFFSET {}",
+            where_clause, order_by, limit, offset
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let user_iter = stmt.query_map([role.to_string()], |row| self.row_to_user(row))?;
+
+        let mut users = Vec::new();
+        for user in user_iter {
+            users.push(user?);
+        }
+
+        let total_count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM users {}", where_clause),
+            [role.to_string()],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(users, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    // =============================================================================
+    // Security Enhancement Methods (Placeholder implementations for future use)
+    // =============================================================================
+
+    /// Initialize rate limiting tracking for a user (placeholder)
+    ///
+    /// Note: This is a placeholder implementation for future rate limiting functionality
+    pub fn init_rate_limiting(&self, user_id: i64) -> AppResult<()> {
+        debug!("Initializing rate limiting for user: {} (placeholder)", user_id);
+        // TODO: Implement actual rate limiting logic with Redis or in-memory store
+        Ok(())
+    }
+
+    /// Check if user is rate limited (placeholder)
+    ///
+    /// Note: This is a placeholder implementation for future rate limiting functionality
+    pub fn is_rate_limited(&self, user_id: i64, _action: &str) -> AppResult<bool> {
+        debug!("Checking rate limit for user: {} (placeholder)", user_id);
+        // TODO: Implement actual rate limiting check
+        Ok(false)
+    }
+
+    /// Log user activity for audit purposes (placeholder)
+    ///
+    /// Note: This is a placeholder implementation for future audit functionality
+    pub fn log_user_activity(&self, user_id: i64, activity: &str, metadata: Option<&str>) -> AppResult<()> {
+        info!("User activity - ID: {}, Action: {}, Metadata: {:?} (placeholder)",
+              user_id, activity, metadata);
+        // TODO: Implement actual activity logging to database or external service
+        Ok(())
+    }
+
+    /// Get user activity history (placeholder)
+    ///
+    /// Note: This is a placeholder implementation for future audit functionality
+    pub fn get_user_activity_history(&self, user_id: i64, _filter: QueryFilter) -> AppResult<Vec<String>> {
+        debug!("Getting activity history for user: {} (placeholder)", user_id);
+        // TODO: Implement actual activity history retrieval
+        Ok(vec!["Activity logging not yet implemented".to_string()])
+    }
+
+    /// Get account lockout information for a user
+    ///
+    /// Note: Basic implementation - extend as needed for production use
+    pub fn get_account_lockout_info(&self, user_id: i64) -> AppResult<AccountLockoutInfo> {
+        debug!("Getting account lockout info for user: {}", user_id);
+        
+        // For now, return a basic implementation
+        // TODO: Implement actual lockout tracking with database table
+        Ok(AccountLockoutInfo {
+            user_id,
+            failed_attempts: 0,
+            locked_at: None,
+            locked_until: None,
+            is_locked: false,
+        })
+    }
+
+    /// Lock user account (placeholder)
+    ///
+    /// Note: This is a placeholder implementation for future account lockout functionality
+    pub fn lock_user_account(&self, user_id: i64, _reason: &str) -> AppResult<()> {
+        info!("Locking user account: {} (placeholder)", user_id);
+        // TODO: Implement actual account locking logic
+        self.database.with_transaction(|conn| {
+            conn.execute(
+                "UPDATE users SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![user_id]
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Unlock user account (placeholder)
+    ///
+    /// Note: This is a placeholder implementation for future account lockout functionality
+    pub fn unlock_user_account(&self, user_id: i64) -> AppResult<()> {
+        info!("Unlocking user account: {} (placeholder)", user_id);
+        // TODO: Implement actual account unlocking logic
+        self.database.with_transaction(|conn| {
+            conn.execute(
+                "UPDATE users SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+                params![user_id]
+            )?;
+            Ok(())
+        })
     }
 
     fn row_to_user(&self, row: &Row) -> rusqlite::Result<User> {

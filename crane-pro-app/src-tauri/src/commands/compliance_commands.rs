@@ -7,11 +7,11 @@ use crate::api::{ApiResponse, QueryFilterRequest, CreateComplianceRecordRequest,
                 ComplianceRecordUpdateRequest, PaginatedResponse, ComplianceStatus,
                 ComplianceRequirement};
 use crate::commands::AppState;
-use crate::middleware::{Permissions, auth::AuthHelper};
+use crate::middleware::auth::AuthHelper;
 use crate::models::{PaginatedResult};
-use crate::{require_auth, require_resource_access, time_command, command_handler};
+use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
-use log::{info, debug, error};
+use log::{info, debug};
 use chrono::Utc;
 
 /// Create a new compliance record

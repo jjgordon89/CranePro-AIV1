@@ -1,7 +1,8 @@
-//! Database module for CranePro Bridge Inspection Application
+//! Core Database module for CranePro Bridge Inspection Application
 //!
-//! This module handles database initialization, connections, migrations,
-//! and core database operations using SQLite with connection pooling.
+//! This module handles database initialization, connections, and core database
+//! operations using SQLite with connection pooling. It integrates with the
+//! enhanced migration system for robust database management.
 
 use crate::errors::{AppError, AppResult};
 use rusqlite::{Connection, OpenFlags};
@@ -82,7 +83,9 @@ impl DatabasePool {
         conn.execute("PRAGMA temp_store = memory", [])?;
 
         Ok(conn)
-    }    /// Get a connection from the pool
+    }
+
+    /// Get a connection from the pool
     pub fn get_connection(&self) -> AppResult<Connection> {
         let mut pool = self.connections.lock()
             .map_err(|_| AppError::database("Failed to acquire connection pool lock"))?;
@@ -113,7 +116,7 @@ impl DatabasePool {
 /// Main database service
 pub struct Database {
     pool: DatabasePool,
-    migrations: MigrationManager,
+    migrations: LegacyMigrationManager,
 }
 
 impl Database {
@@ -133,22 +136,24 @@ impl Database {
         }
 
         let pool = DatabasePool::new(db_path).await?;
-        let migrations = MigrationManager::new();
+        let migrations = LegacyMigrationManager::new();
 
-        let mut db = Self { pool, migrations };
+        let db = Self { pool, migrations };
 
         // Run migrations
         db.migrate().await?;
 
         Ok(db)
-    }    /// Initialize an in-memory database for testing
+    }
+
+    /// Initialize an in-memory database for testing
     pub async fn new_in_memory() -> AppResult<Self> {
         info!("Initializing in-memory database");
 
         let pool = DatabasePool::new_in_memory().await?;
-        let migrations = MigrationManager::new();
+        let migrations = LegacyMigrationManager::new();
 
-        let mut db = Self { pool, migrations };
+        let db = Self { pool, migrations };
 
         // Run migrations
         db.migrate().await?;
@@ -242,24 +247,24 @@ impl Database {
     }
 }
 
-/// Migration manager for database schema changes
-pub struct MigrationManager {
-    migrations: Vec<Migration>,
+/// Legacy Migration manager for database schema changes (for backward compatibility)
+pub struct LegacyMigrationManager {
+    migrations: Vec<LegacyMigration>,
 }
 
-impl MigrationManager {
+impl LegacyMigrationManager {
     pub fn new() -> Self {
         let mut migrations = Vec::new();
         
         // Add initial schema migration
-        migrations.push(Migration {
+        migrations.push(LegacyMigration {
             version: 1,
             description: "Initial schema creation".to_string(),
             up_sql: INITIAL_SCHEMA.to_string(),
             down_sql: "".to_string(), // Initial migration cannot be rolled back
         });
 
-        MigrationManager { migrations }
+        LegacyMigrationManager { migrations }
     }
 
     /// Run migrations from current version to target version
@@ -288,9 +293,9 @@ impl MigrationManager {
     }
 }
 
-/// Represents a database migration
+/// Represents a legacy database migration (for backward compatibility)
 #[derive(Debug, Clone)]
-pub struct Migration {
+pub struct LegacyMigration {
     pub version: i32,
     pub description: String,
     pub up_sql: String,

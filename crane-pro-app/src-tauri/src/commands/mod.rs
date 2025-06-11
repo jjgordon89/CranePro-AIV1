@@ -18,7 +18,7 @@ pub use user_commands::*;
 pub use media_commands::*;
 pub use report_commands::*;
 
-use crate::api::{ApiResponse, ApiError};
+use crate::api::ApiResponse;
 use crate::errors::AppError;
 use crate::services::Services;
 use crate::middleware::auth::AuthManager;

@@ -3,14 +3,13 @@
 //! This module contains all Tauri command handlers for media file management
 //! operations including file upload, retrieval, and deletion.
 
-use crate::api::{ApiResponse, UploadFileRequest, MediaFileUpdateRequest};
+use crate::api::{ApiResponse, UploadFileRequest};
 use crate::commands::AppState;
-use crate::middleware::{Permissions, auth::AuthHelper};
+use crate::middleware::auth::AuthHelper;
 use crate::models::{MediaFile, MediaType};
-use crate::services::MediaFileUpdateData;
-use crate::{require_auth, require_resource_access, time_command, command_handler};
+use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
-use log::{info, debug, error, warn};
+use log::{info, debug, warn};
 use chrono::Utc;
 use std::path::Path;
 use std::fs;

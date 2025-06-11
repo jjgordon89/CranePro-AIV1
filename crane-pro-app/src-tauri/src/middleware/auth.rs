@@ -5,13 +5,13 @@
 
 use crate::errors::{AppError, AppResult};
 use crate::middleware::{UserSession, Permissions, RequestContext};
-use crate::models::{User, UserRole};
+use crate::models::User;
 use crate::services::Services;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation, Algorithm};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use chrono::{DateTime, Utc, Duration};
+use chrono::{Utc, Duration};
 use log::{debug, warn, error};
 
 /// JWT claims structure
@@ -352,18 +352,56 @@ macro_rules! require_resource_access {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::Database;
-    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_token_generation_and_validation() {
-        // This would be a more comprehensive test in a real implementation
+        // Simple test for token generation without database dependency
         let jwt_secret = "test_secret_key_for_testing_only";
-        let database = Arc::new(Database::new_in_memory().await.unwrap());
-        let services = Arc::new(Services::init(database).await.unwrap());
-        let auth_manager = AuthManager::new(services, jwt_secret);
+        
+        // Create mock user for testing
+        use crate::models::{User, UserRole};
+        let user = User {
+            id: 1,
+            username: "testuser".to_string(),
+            email: "test@example.com".to_string(),
+            password_hash: "hashed_password".to_string(),
+            role: UserRole::Inspector,
+            first_name: "Test".to_string(),
+            last_name: "User".to_string(),
+            phone: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            is_active: true,
+        };
 
-        // Test would create a user, authenticate, and validate token
-        // Implementation depends on having test data setup
+        // Test basic token generation components
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let permissions = vec!["read:inspections".to_string()];
+        
+        // Create claims
+        let now = Utc::now();
+        let expiration = now + Duration::hours(8);
+        
+        let claims = TokenClaims {
+            sub: user.id.to_string(),
+            username: user.username.clone(),
+            role: user.role.to_string(),
+            session_id: session_id.clone(),
+            iat: now.timestamp(),
+            exp: expiration.timestamp(),
+            permissions: permissions.clone(),
+        };
+
+        // Test encoding/decoding
+        let encoding_key = EncodingKey::from_secret(jwt_secret.as_ref());
+        let decoding_key = DecodingKey::from_secret(jwt_secret.as_ref());
+        
+        let token = encode(&Header::default(), &claims, &encoding_key).unwrap();
+        let validation = Validation::new(Algorithm::HS256);
+        let decoded = decode::<TokenClaims>(&token, &decoding_key, &validation).unwrap();
+        
+        assert_eq!(decoded.claims.username, user.username);
+        assert_eq!(decoded.claims.session_id, session_id);
+        assert_eq!(decoded.claims.permissions, permissions);
     }
 }

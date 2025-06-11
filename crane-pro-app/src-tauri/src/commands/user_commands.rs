@@ -27,13 +27,10 @@ pub async fn create_user_command(
         
         require_resource_access!(context, "user", "create");
 
-        // Hash password before creating user
-        let password_hash = bcrypt::hash(&user_data.password, bcrypt::DEFAULT_COST)
-            .map_err(|e| format!("Failed to hash password: {}", e))?;
-
-        // Create user
-        let user = user_data.to_user(password_hash);
-        let created_user = state.services.users.create_user(user)
+        // Create user - the service will handle password validation and hashing
+        let plain_password = user_data.password.clone(); // Extract password before move
+        let user = user_data.to_user(String::new()); // Temporary password_hash, service will replace it
+        let created_user = state.services.users.create_user(user, plain_password)
             .map_err(|e| format!("Failed to create user: {}", e))?;
 
         info!("User created: {} by admin {}", 

@@ -5,10 +5,10 @@
 
 use crate::api::{ApiResponse, ReportFormat, DateRange, ReportResult, ReportTemplate};
 use crate::commands::AppState;
-use crate::middleware::{Permissions, auth::AuthHelper};
-use crate::{require_auth, require_resource_access, time_command, command_handler};
+use crate::middleware::auth::AuthHelper;
+use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
-use log::{info, debug, error};
+use log::{info, debug};
 use chrono::Utc;
 use std::path::Path;
 use std::fs;
