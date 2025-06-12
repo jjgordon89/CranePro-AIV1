@@ -126,6 +126,7 @@ pub struct Location {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub description: Option<String>,
+    pub parent_location_id: Option<i64>,
     pub created_by: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -160,6 +161,70 @@ impl Validate for Location {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationUpdateData {
+    pub name: Option<String>,
+    pub address: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub description: Option<String>,
+    pub parent_location_id: Option<Option<i64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationWithAssets {
+    pub id: i64,
+    pub name: String,
+    pub address: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub description: Option<String>,
+    pub parent_location_id: Option<i64>,
+    pub created_by: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub assets: Vec<Asset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationAssetSummary {
+    pub id: i64,
+    pub name: String,
+    pub address: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub description: Option<String>,
+    pub parent_location_id: Option<i64>,
+    pub created_by: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub asset_count: i64,
+    pub critical_assets: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationWithAssetCount {
+    pub id: i64,
+    pub name: String,
+    pub address: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub description: Option<String>,
+    pub parent_location_id: Option<i64>,
+    pub created_by: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub asset_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocationDeletionResult {
+    pub success: bool,
+    pub location_id: i64,
+    pub affected_assets: i64,
+    pub message: String,
 }
 
 // =============================================================================

@@ -46,6 +46,11 @@ use crate::commands::{
     // Report commands
     generate_inspection_report_command, generate_compliance_report_command, get_report_command,
     list_available_reports_command,
+    
+    // Location commands
+    create_location_command, get_location_command, update_location_command,
+    delete_location_command, get_location_with_assets_command, get_location_asset_summary_command,
+    validate_asset_location_assignment_command, search_locations_with_asset_counts_command,
 };
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -171,6 +176,16 @@ pub fn run() {
             generate_compliance_report_command,
             get_report_command,
             list_available_reports_command,
+            
+            // Location management commands (8 commands)
+            create_location_command,
+            get_location_command,
+            update_location_command,
+            delete_location_command,
+            get_location_with_assets_command,
+            get_location_asset_summary_command,
+            validate_asset_location_assignment_command,
+            search_locations_with_asset_counts_command,
         ])
         
         .run(tauri::generate_context!())

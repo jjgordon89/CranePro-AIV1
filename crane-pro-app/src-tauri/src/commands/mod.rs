@@ -9,6 +9,7 @@ pub mod compliance_commands;
 pub mod user_commands;
 pub mod media_commands;
 pub mod report_commands;
+pub mod location_commands;
 
 // Re-export all command handlers for easy registration
 pub use asset_commands::*;
@@ -17,6 +18,7 @@ pub use compliance_commands::*;
 pub use user_commands::*;
 pub use media_commands::*;
 pub use report_commands::*;
+pub use location_commands::*;
 
 use crate::api::ApiResponse;
 use crate::errors::AppError;

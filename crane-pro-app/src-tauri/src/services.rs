@@ -186,6 +186,82 @@ pub struct MaintenanceHistoryReport {
     pub next_scheduled_maintenance: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetSummary {
+    pub asset_id: i64,
+    pub asset_name: String,
+    pub asset_number: String,
+    pub asset_type: String,
+    pub location_name: String,
+    pub status: AssetStatus,
+    pub total_inspections: i64,
+    pub completed_inspections: i64,
+    pub pending_inspections: i64,
+    pub last_inspection_date: Option<DateTime<Utc>>,
+    pub next_inspection_date: Option<DateTime<Utc>>,
+    pub overall_condition: Option<Condition>,
+    pub maintenance_records_count: i64,
+    pub last_maintenance_date: Option<DateTime<Utc>>,
+    pub next_maintenance_date: Option<DateTime<Utc>>,
+    pub compliance_score: f64,
+    pub critical_findings_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkImportResult {
+    pub total_processed: i64,
+    pub successful_imports: i64,
+    pub failed_imports: i64,
+    pub results: Vec<AssetImportResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetImportResult {
+    pub asset_number: String,
+    pub success: bool,
+    pub asset_id: Option<i64>,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetStatusFilter {
+    pub status: AssetStatus,
+    pub include_inactive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetComplianceSummary {
+    pub asset_id: i64,
+    pub asset_name: String,
+    pub overall_compliance_score: f64,
+    pub last_inspection_date: Option<DateTime<Utc>>,
+    pub next_required_inspection: Option<DateTime<Utc>>,
+    pub critical_findings: i64,
+    pub overdue_inspections: i64,
+    pub compliance_status: String, // "Compliant", "Non-Compliant", "Overdue", "No Data"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetTransferRequest {
+    pub asset_id: i64,
+    pub from_location_id: i64,
+    pub to_location_id: i64,
+    pub transfer_reason: String,
+    pub transferred_by: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MaintenanceHistoryEntry {
+    pub id: i64,
+    pub maintenance_type: String,
+    pub scheduled_date: Option<DateTime<Utc>>,
+    pub completed_date: Option<DateTime<Utc>>,
+    pub performed_by: String,
+    pub description: String,
+    pub cost: Option<f64>,
+    pub status: String,
+}
+
 // =============================================================================
 // Asset Service
 // =============================================================================
@@ -479,6 +555,558 @@ impl AssetService {
             created_by: row.get(15)?,
             created_at: row.get(16)?,
             updated_at: row.get(17)?,
+        })
+    }
+
+    /// Get comprehensive asset summary including inspections, maintenance, and compliance data
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset ID to get summary for
+    ///
+    /// # Returns
+    /// * `AssetSummary` with comprehensive asset data
+    pub fn get_asset_summary(&self, asset_id: i64) -> AppResult<AssetSummary> {
+        info!("Getting asset summary for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        // Get basic asset information with location name
+        let (asset_name, asset_number, asset_type, location_name, status): (String, String, String, String, String) = conn.query_row(
+            "SELECT a.asset_name, a.asset_number, a.asset_type, l.name, a.status
+             FROM assets a
+             JOIN locations l ON a.location_id = l.id
+             WHERE a.id = ?1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Asset".to_string(),
+            field: "id".to_string(),
+            value: asset_id.to_string(),
+        })?;
+
+        // Get inspection counts and dates
+        let (total_inspections, completed_inspections, pending_inspections): (i64, i64, i64) = conn.query_row(
+            "SELECT
+                COUNT(*) as total,
+                COUNT(CASE WHEN status = 'Completed' THEN 1 END) as completed,
+                COUNT(CASE WHEN status IN ('Scheduled', 'In Progress') THEN 1 END) as pending
+             FROM inspections WHERE asset_id = ?1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        // Get last and next inspection dates, and overall condition
+        let (last_inspection_date, overall_condition): (Option<DateTime<Utc>>, Option<String>) = conn.query_row(
+            "SELECT actual_date, overall_condition FROM inspections
+             WHERE asset_id = ?1 AND status = 'Completed'
+             ORDER BY actual_date DESC LIMIT 1",
+            params![asset_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap_or((None, None));
+
+        // Calculate next inspection date (simple heuristic: 1 year from last inspection or 30 days from now)
+        let next_inspection_date = last_inspection_date
+            .map(|date| date + chrono::Duration::days(365))
+            .or_else(|| Some(Utc::now() + chrono::Duration::days(30)));
+
+        // Get maintenance records count and dates
+        let maintenance_records_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM maintenance_records WHERE asset_id = ?1",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        let (last_maintenance_date, next_maintenance_date): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) = (
+            conn.query_row(
+                "SELECT MAX(completed_date) FROM maintenance_records
+                 WHERE asset_id = ?1 AND status = 'Completed'",
+                params![asset_id],
+                |row| row.get(0),
+            ).unwrap_or(None),
+            conn.query_row(
+                "SELECT MIN(scheduled_date) FROM maintenance_records
+                 WHERE asset_id = ?1 AND status = 'Scheduled' AND scheduled_date > datetime('now')",
+                params![asset_id],
+                |row| row.get(0),
+            ).unwrap_or(None)
+        );
+
+        // Calculate compliance score (average of all completed inspections)
+        let compliance_score: f64 = if completed_inspections > 0 {
+            let mut total_score = 0.0;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM inspections WHERE asset_id = ?1 AND status = 'Completed'"
+            )?;
+            let inspection_iter = stmt.query_map(params![asset_id], |row| row.get::<_, i64>(0))?;
+            
+            for inspection_result in inspection_iter {
+                let inspection_id = inspection_result?;
+                let (total_items, compliant_items): (i64, i64) = conn.query_row(
+                    "SELECT
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN is_compliant = 1 THEN 1 END) as compliant
+                     FROM inspection_items WHERE inspection_id = ?1",
+                    params![inspection_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                
+                if total_items > 0 {
+                    total_score += (compliant_items as f64 / total_items as f64) * 100.0;
+                }
+            }
+            total_score / completed_inspections as f64
+        } else {
+            0.0
+        };
+
+        // Get critical findings count
+        let critical_findings_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inspection_items ii
+             JOIN inspections i ON ii.inspection_id = i.id
+             WHERE i.asset_id = ?1 AND ii.severity = 'Critical' AND i.status = 'Completed'",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        self.database.return_connection(conn);
+
+        debug!("Asset summary generated for asset: {}", asset_id);
+        Ok(AssetSummary {
+            asset_id,
+            asset_name,
+            asset_number,
+            asset_type,
+            location_name,
+            status: status.parse().unwrap_or(AssetStatus::Active),
+            total_inspections,
+            completed_inspections,
+            pending_inspections,
+            last_inspection_date,
+            next_inspection_date,
+            overall_condition: overall_condition.and_then(|s| s.parse().ok()),
+            maintenance_records_count,
+            last_maintenance_date,
+            next_maintenance_date,
+            compliance_score,
+            critical_findings_count,
+        })
+    }
+
+    /// Bulk import assets with validation and transaction handling
+    ///
+    /// # Arguments
+    /// * `assets` - Vector of Asset objects to import
+    ///
+    /// # Returns
+    /// * `BulkImportResult` with detailed results for each asset
+    pub fn bulk_import_assets(&self, assets: Vec<Asset>) -> AppResult<BulkImportResult> {
+        info!("Starting bulk import of {} assets", assets.len());
+        let mut results = Vec::new();
+        let mut successful_imports = 0i64;
+        let mut failed_imports = 0i64;
+
+        for asset in assets.iter() {
+            debug!("Processing asset import: {}", asset.asset_number);
+            
+            // Validate asset
+            match asset.validate() {
+                Ok(_) => {
+                    // Check if location exists
+                    let location_exists = self.database.with_connection(|conn| {
+                        let count: i64 = conn.query_row(
+                            "SELECT COUNT(*) FROM locations WHERE id = ?1",
+                            params![asset.location_id],
+                            |row| row.get(0),
+                        )?;
+                        Ok(count > 0)
+                    })?;
+
+                    if !location_exists {
+                        failed_imports += 1;
+                        results.push(AssetImportResult {
+                            asset_number: asset.asset_number.clone(),
+                            success: false,
+                            asset_id: None,
+                            error_message: Some(format!("Location with ID {} does not exist", asset.location_id)),
+                        });
+                        continue;
+                    }
+
+                    // Try to create the asset
+                    match self.create_asset(asset.clone()) {
+                        Ok(created_asset) => {
+                            successful_imports += 1;
+                            results.push(AssetImportResult {
+                                asset_number: asset.asset_number.clone(),
+                                success: true,
+                                asset_id: Some(created_asset.id),
+                                error_message: None,
+                            });
+                            debug!("Successfully imported asset: {}", asset.asset_number);
+                        }
+                        Err(e) => {
+                            failed_imports += 1;
+                            results.push(AssetImportResult {
+                                asset_number: asset.asset_number.clone(),
+                                success: false,
+                                asset_id: None,
+                                error_message: Some(e.to_string()),
+                            });
+                            debug!("Failed to import asset {}: {}", asset.asset_number, e);
+                        }
+                    }
+                }
+                Err(validation_error) => {
+                    failed_imports += 1;
+                    results.push(AssetImportResult {
+                        asset_number: asset.asset_number.clone(),
+                        success: false,
+                        asset_id: None,
+                        error_message: Some(validation_error.to_string()),
+                    });
+                    debug!("Asset validation failed for {}: {}", asset.asset_number, validation_error);
+                }
+            }
+        }
+
+        let total_processed = assets.len() as i64;
+        info!("Bulk import completed: {}/{} successful", successful_imports, total_processed);
+
+        Ok(BulkImportResult {
+            total_processed,
+            successful_imports,
+            failed_imports,
+            results,
+        })
+    }
+
+    /// Get maintenance history for a specific asset
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset ID to get maintenance history for
+    ///
+    /// # Returns
+    /// * `Vec<MaintenanceHistoryEntry>` with structured maintenance history data
+    pub fn get_asset_maintenance_history(&self, asset_id: i64) -> AppResult<Vec<MaintenanceHistoryEntry>> {
+        info!("Getting maintenance history for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        // Verify asset exists
+        let _asset = self.get_asset_by_id(asset_id)?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, maintenance_type, scheduled_date, completed_date, performed_by, description, cost, status
+             FROM maintenance_records WHERE asset_id = ?1 ORDER BY created_at DESC"
+        )?;
+
+        let maintenance_iter = stmt.query_map(params![asset_id], |row| {
+            Ok(MaintenanceHistoryEntry {
+                id: row.get(0)?,
+                maintenance_type: row.get(1)?,
+                scheduled_date: row.get(2)?,
+                completed_date: row.get(3)?,
+                performed_by: row.get(4)?,
+                description: row.get(5)?,
+                cost: row.get(6)?,
+                status: row.get(7)?,
+            })
+        })?;
+
+        let mut maintenance_history = Vec::new();
+        for maintenance in maintenance_iter {
+            maintenance_history.push(maintenance?);
+        }
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        debug!("Retrieved {} maintenance records for asset: {}", maintenance_history.len(), asset_id);
+        Ok(maintenance_history)
+    }
+
+    /// Validate asset-location assignment
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset ID to validate
+    /// * `location_id` - The location ID to validate
+    ///
+    /// # Returns
+    /// * `AppResult<()>` indicating validation success or failure
+    pub fn validate_asset_location_assignment(&self, asset_id: i64, location_id: i64) -> AppResult<()> {
+        debug!("Validating asset-location assignment: asset={}, location={}", asset_id, location_id);
+        
+        // Check if asset exists
+        let _asset = self.get_asset_by_id(asset_id)?;
+        
+        // Check if location exists
+        self.database.with_connection(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM locations WHERE id = ?1",
+                params![location_id],
+                |row| row.get(0),
+            )?;
+            
+            if count == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "Location".to_string(),
+                    field: "id".to_string(),
+                    value: location_id.to_string(),
+                });
+            }
+            Ok(())
+        })?;
+        
+        debug!("Asset-location assignment validation successful");
+        Ok(())
+    }
+
+    /// Get assets filtered by status with pagination
+    ///
+    /// # Arguments
+    /// * `status_filter` - The status filter criteria
+    /// * `filter` - Query filter with pagination parameters
+    ///
+    /// # Returns
+    /// * `PaginatedResult<Asset>` with assets matching the status filter
+    pub fn get_assets_by_status(&self, status_filter: AssetStatusFilter, filter: QueryFilter) -> AppResult<PaginatedResult<Asset>> {
+        info!("Fetching assets by status: {:?}", status_filter);
+        let conn = self.database.get_connection()?;
+
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+        let sort_order = filter.sort_order.unwrap_or(SortOrder::Desc);
+        let sort_by = filter.sort_by.unwrap_or("created_at".to_string());
+
+        // Build WHERE conditions
+        let where_clause = if status_filter.include_inactive {
+            "WHERE status = ?"
+        } else {
+            "WHERE status = ? AND status != 'Inactive'"
+        };
+
+        let order_by = format!(" ORDER BY {} {}", sort_by, sort_order);
+
+        let query = format!(
+            "SELECT id, asset_number, asset_name, asset_type, manufacturer, model,
+             serial_number, manufacture_date, installation_date, capacity, capacity_unit,
+             location_id, status, description, specifications, created_by, created_at, updated_at
+             FROM assets {} {} LIMIT {} OFFSET {}",
+            where_clause, order_by, limit, offset
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let asset_iter = stmt.query_map([status_filter.status.to_string()], |row| self.row_to_asset(row))?;
+
+        let mut assets = Vec::new();
+        for asset in asset_iter {
+            assets.push(asset?);
+        }
+
+        // Get total count
+        let total_count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM assets {}", where_clause),
+            [status_filter.status.to_string()],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(assets, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    /// Get compliance summary for a specific asset
+    ///
+    /// # Arguments
+    /// * `asset_id` - The asset ID to get compliance summary for
+    ///
+    /// # Returns
+    /// * `AssetComplianceSummary` with compliance status and critical findings
+    pub fn get_asset_compliance_summary(&self, asset_id: i64) -> AppResult<AssetComplianceSummary> {
+        info!("Getting compliance summary for asset: {}", asset_id);
+        let conn = self.database.get_connection()?;
+
+        // Get asset name
+        let asset_name: String = conn.query_row(
+            "SELECT asset_name FROM assets WHERE id = ?1",
+            params![asset_id],
+            |row| row.get(0),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Asset".to_string(),
+            field: "id".to_string(),
+            value: asset_id.to_string(),
+        })?;
+
+        // Get last inspection date
+        let last_inspection_date: Option<DateTime<Utc>> = conn.query_row(
+            "SELECT MAX(actual_date) FROM inspections
+             WHERE asset_id = ?1 AND status = 'Completed'",
+            params![asset_id],
+            |row| row.get(0),
+        ).unwrap_or(None);
+
+        // Calculate next required inspection (1 year from last or 30 days from now)
+        let next_required_inspection = last_inspection_date
+            .map(|date| date + chrono::Duration::days(365))
+            .or_else(|| Some(Utc::now() + chrono::Duration::days(30)));
+
+        // Calculate overall compliance score
+        let overall_compliance_score: f64 = {
+            let completed_inspections: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM inspections WHERE asset_id = ?1 AND status = 'Completed'",
+                params![asset_id],
+                |row| row.get(0),
+            )?;
+
+            if completed_inspections > 0 {
+                let mut total_score = 0.0;
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM inspections WHERE asset_id = ?1 AND status = 'Completed'"
+                )?;
+                let inspection_iter = stmt.query_map(params![asset_id], |row| row.get::<_, i64>(0))?;
+                
+                for inspection_result in inspection_iter {
+                    let inspection_id = inspection_result?;
+                    let (total_items, compliant_items): (i64, i64) = conn.query_row(
+                        "SELECT
+                            COUNT(*) as total,
+                            COUNT(CASE WHEN is_compliant = 1 THEN 1 END) as compliant
+                         FROM inspection_items WHERE inspection_id = ?1",
+                        params![inspection_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    
+                    if total_items > 0 {
+                        total_score += (compliant_items as f64 / total_items as f64) * 100.0;
+                    }
+                }
+                total_score / completed_inspections as f64
+            } else {
+                0.0
+            }
+        };
+
+        // Get critical findings count
+        let critical_findings: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inspection_items ii
+             JOIN inspections i ON ii.inspection_id = i.id
+             WHERE i.asset_id = ?1 AND ii.severity = 'Critical' AND i.status = 'Completed'",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        // Get overdue inspections count
+        let overdue_inspections: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM inspections
+             WHERE asset_id = ?1 AND scheduled_date < datetime('now') AND status NOT IN ('Completed', 'Cancelled')",
+            params![asset_id],
+            |row| row.get(0),
+        )?;
+
+        // Determine compliance status
+        let compliance_status = if overall_compliance_score == 0.0 {
+            "No Data".to_string()
+        } else if overdue_inspections > 0 {
+            "Overdue".to_string()
+        } else if overall_compliance_score >= 80.0 {
+            "Compliant".to_string()
+        } else {
+            "Non-Compliant".to_string()
+        };
+
+        self.database.return_connection(conn);
+
+        debug!("Compliance summary generated for asset: {}", asset_id);
+        Ok(AssetComplianceSummary {
+            asset_id,
+            asset_name,
+            overall_compliance_score,
+            last_inspection_date,
+            next_required_inspection,
+            critical_findings,
+            overdue_inspections,
+            compliance_status,
+        })
+    }
+
+    /// Transfer asset from one location to another with validation and audit logging
+    ///
+    /// # Arguments
+    /// * `transfer_request` - The transfer request details
+    ///
+    /// # Returns
+    /// * `AppResult<Asset>` the updated asset
+    pub fn transfer_asset_location(&self, transfer_request: AssetTransferRequest) -> AppResult<Asset> {
+        info!("Transferring asset {} from location {} to location {}",
+              transfer_request.asset_id, transfer_request.from_location_id, transfer_request.to_location_id);
+
+        self.database.with_transaction(|conn| {
+            // Validate asset exists and is at the source location
+            let current_location_id: i64 = conn.query_row(
+                "SELECT location_id FROM assets WHERE id = ?1",
+                params![transfer_request.asset_id],
+                |row| row.get(0),
+            ).map_err(|_| AppError::RecordNotFound {
+                entity: "Asset".to_string(),
+                field: "id".to_string(),
+                value: transfer_request.asset_id.to_string(),
+            })?;
+
+            if current_location_id != transfer_request.from_location_id {
+                return Err(AppError::validation(
+                    "from_location_id",
+                    format!("Asset is not currently at location {}", transfer_request.from_location_id)
+                ));
+            }
+
+            // Validate target location exists
+            let target_location_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM locations WHERE id = ?1",
+                params![transfer_request.to_location_id],
+                |row| row.get(0),
+            )?;
+
+            if target_location_count == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "Location".to_string(),
+                    field: "id".to_string(),
+                    value: transfer_request.to_location_id.to_string(),
+                });
+            }
+
+            // Validate user exists
+            let user_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM users WHERE id = ?1",
+                params![transfer_request.transferred_by],
+                |row| row.get(0),
+            )?;
+
+            if user_count == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "User".to_string(),
+                    field: "id".to_string(),
+                    value: transfer_request.transferred_by.to_string(),
+                });
+            }
+
+            // Update asset location
+            let rows_affected = conn.execute(
+                "UPDATE assets SET location_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![transfer_request.to_location_id, transfer_request.asset_id]
+            )?;
+
+            if rows_affected == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "Asset".to_string(),
+                    field: "id".to_string(),
+                    value: transfer_request.asset_id.to_string(),
+                });
+            }
+
+            // Log the transfer for audit (this would typically go to an audit log table)
+            info!("Asset transfer completed: asset_id={}, from_location={}, to_location={}, transferred_by={}, reason='{}'",
+                  transfer_request.asset_id, transfer_request.from_location_id,
+                  transfer_request.to_location_id, transfer_request.transferred_by, transfer_request.transfer_reason);
+
+            debug!("Asset {} transferred successfully", transfer_request.asset_id);
+            self.get_asset_by_id(transfer_request.asset_id)
         })
     }
 
@@ -2462,28 +3090,326 @@ impl ReportService {
 }
 
 // =============================================================================
+// Location Service
+// =============================================================================
+
+pub struct LocationService {
+    database: Arc<Database>,
+    asset_service: Arc<AssetService>,
+}
+
+impl LocationService {
+    pub fn new(database: Arc<Database>, asset_service: Arc<AssetService>) -> Self {
+        Self { database, asset_service }
+    }
+
+    pub fn create_location(&self, location: Location) -> AppResult<Location> {
+        info!("Creating new location: {}", location.name);
+        location.validate()?;
+
+        self.database.with_transaction(|conn| {
+            let id = conn.query_row(
+                "INSERT INTO locations (name, address, latitude, longitude, description, parent_location_id, created_by, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))
+                 RETURNING id",
+                params![
+                    location.name, location.address, location.latitude, location.longitude,
+                    location.description, location.parent_location_id, location.created_by
+                ],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            debug!("Location created with ID: {}", id);
+            self.get_location_by_id(id)
+        })
+    }
+
+    pub fn get_location_by_id(&self, id: i64) -> AppResult<Location> {
+        debug!("Fetching location by ID: {}", id);
+        let conn = self.database.get_connection()?;
+        
+        let location = conn.query_row(
+            "SELECT id, name, address, latitude, longitude, description, parent_location_id, created_by, created_at, updated_at
+             FROM locations WHERE id = ?1",
+            params![id],
+            |row| self.row_to_location(row),
+        ).map_err(|_| AppError::RecordNotFound {
+            entity: "Location".to_string(),
+            field: "id".to_string(),
+            value: id.to_string(),
+        })?;
+
+        self.database.return_connection(conn);
+        Ok(location)
+    }
+
+    pub fn update_location(&self, id: i64, updates: LocationUpdateData) -> AppResult<Location> {
+        info!("Updating location: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            if let Some(name) = &updates.name {
+                conn.execute("UPDATE locations SET name = ?1, updated_at = datetime('now') WHERE id = ?2", params![name, id])?;
+            }
+            if let Some(address) = &updates.address {
+                conn.execute("UPDATE locations SET address = ?1, updated_at = datetime('now') WHERE id = ?2", params![address, id])?;
+            }
+            if let Some(latitude) = &updates.latitude {
+                conn.execute("UPDATE locations SET latitude = ?1, updated_at = datetime('now') WHERE id = ?2", params![latitude, id])?;
+            }
+            if let Some(longitude) = &updates.longitude {
+                conn.execute("UPDATE locations SET longitude = ?1, updated_at = datetime('now') WHERE id = ?2", params![longitude, id])?;
+            }
+            if let Some(description) = &updates.description {
+                conn.execute("UPDATE locations SET description = ?1, updated_at = datetime('now') WHERE id = ?2", params![description, id])?;
+            }
+            if let Some(parent_location_id) = &updates.parent_location_id {
+                conn.execute("UPDATE locations SET parent_location_id = ?1, updated_at = datetime('now') WHERE id = ?2", params![parent_location_id, id])?;
+            }
+
+            debug!("Location {} updated successfully", id);
+            self.get_location_by_id(id)
+        })
+    }
+
+    pub fn delete_location_safe(&self, id: i64) -> AppResult<LocationDeletionResult> {
+        info!("Safely deleting location: {}", id);
+        
+        self.database.with_transaction(|conn| {
+            // Check for dependent assets first
+            let asset_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM assets WHERE location_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+
+            if asset_count > 0 {
+                return Ok(LocationDeletionResult {
+                    success: false,
+                    location_id: id,
+                    affected_assets: asset_count,
+                    message: format!("Cannot delete location: {} assets are still assigned to this location", asset_count),
+                });
+            }
+
+            // Check for child locations
+            let child_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM locations WHERE parent_location_id = ?1",
+                params![id],
+                |row| row.get(0),
+            )?;
+
+            if child_count > 0 {
+                return Ok(LocationDeletionResult {
+                    success: false,
+                    location_id: id,
+                    affected_assets: 0,
+                    message: format!("Cannot delete location: {} child locations exist", child_count),
+                });
+            }
+
+            // Safe to delete
+            let rows_affected = conn.execute("DELETE FROM locations WHERE id = ?1", params![id])?;
+            
+            if rows_affected == 0 {
+                return Err(AppError::RecordNotFound {
+                    entity: "Location".to_string(),
+                    field: "id".to_string(),
+                    value: id.to_string(),
+                });
+            }
+            
+            debug!("Location {} deleted successfully", id);
+            Ok(LocationDeletionResult {
+                success: true,
+                location_id: id,
+                affected_assets: 0,
+                message: "Location deleted successfully".to_string(),
+            })
+        })
+    }
+
+    pub fn get_location_with_assets(&self, id: i64) -> AppResult<LocationWithAssets> {
+        debug!("Fetching location with assets: {}", id);
+        let location = self.get_location_by_id(id)?;
+        
+        // Get assets using the asset service
+        let filter = QueryFilter {
+            page: Some(1),
+            limit: Some(1000), // Get all assets for this location
+            sort_by: Some("asset_name".to_string()),
+            sort_order: Some(SortOrder::Asc),
+            filters: HashMap::new(),
+        };
+        
+        let asset_result = self.asset_service.get_assets_by_location(id, filter)?;
+        
+        Ok(LocationWithAssets {
+            id: location.id,
+            name: location.name,
+            address: location.address,
+            latitude: location.latitude,
+            longitude: location.longitude,
+            description: location.description,
+            parent_location_id: location.parent_location_id,
+            created_by: location.created_by,
+            created_at: location.created_at,
+            updated_at: location.updated_at,
+            assets: asset_result.data,
+        })
+    }
+
+    pub fn get_location_with_asset_summary(&self, id: i64) -> AppResult<LocationAssetSummary> {
+        debug!("Fetching location with asset summary: {}", id);
+        let location = self.get_location_by_id(id)?;
+        let conn = self.database.get_connection()?;
+
+        // Get asset count
+        let asset_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM assets WHERE location_id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+
+        // Get critical assets count (assuming assets with status 'Maintenance' or condition 'Critical')
+        let critical_assets: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT a.id) FROM assets a
+             LEFT JOIN inspections i ON a.id = i.asset_id AND i.status = 'Completed'
+             WHERE a.location_id = ?1 AND (a.status = 'Maintenance' OR i.overall_condition = 'Critical')",
+            params![id],
+            |row| row.get(0),
+        )?;
+
+        self.database.return_connection(conn);
+
+        Ok(LocationAssetSummary {
+            id: location.id,
+            name: location.name,
+            address: location.address,
+            latitude: location.latitude,
+            longitude: location.longitude,
+            description: location.description,
+            parent_location_id: location.parent_location_id,
+            created_by: location.created_by,
+            created_at: location.created_at,
+            updated_at: location.updated_at,
+            asset_count,
+            critical_assets,
+        })
+    }
+
+    pub fn validate_asset_location_assignment(&self, asset_id: i64, location_id: i64) -> AppResult<()> {
+        debug!("Validating asset-location assignment: asset={}, location={}", asset_id, location_id);
+        
+        // Check if location exists
+        let _location = self.get_location_by_id(location_id)?;
+        
+        // Check if asset exists using asset service
+        let _asset = self.asset_service.get_asset_by_id(asset_id)?;
+        
+        debug!("Asset-location assignment validation successful");
+        Ok(())
+    }
+
+    pub fn search_locations_with_asset_counts(&self, query: String, filter: QueryFilter) -> AppResult<PaginatedResult<LocationWithAssetCount>> {
+        info!("Searching locations with asset counts: {}", query);
+        let conn = self.database.get_connection()?;
+
+        let search_term = format!("%{}%", query);
+        let offset = ((filter.page.unwrap_or(1) - 1) * filter.limit.unwrap_or(50)).max(0);
+        let limit = filter.limit.unwrap_or(50);
+        let sort_order = filter.sort_order.unwrap_or(SortOrder::Desc);
+        let sort_by = filter.sort_by.unwrap_or("name".to_string());
+
+        let order_by = format!(" ORDER BY {} {}", sort_by, sort_order);
+
+        let search_query = format!(
+            "SELECT l.id, l.name, l.address, l.latitude, l.longitude, l.description,
+                    l.parent_location_id, l.created_by, l.created_at, l.updated_at,
+                    COUNT(a.id) as asset_count
+             FROM locations l
+             LEFT JOIN assets a ON l.id = a.location_id
+             WHERE l.name LIKE ?1 OR l.address LIKE ?1 OR l.description LIKE ?1
+             GROUP BY l.id, l.name, l.address, l.latitude, l.longitude, l.description,
+                      l.parent_location_id, l.created_by, l.created_at, l.updated_at
+             {} LIMIT {} OFFSET {}",
+            order_by, limit, offset
+        );
+
+        let mut stmt = conn.prepare(&search_query)?;
+        let location_iter = stmt.query_map([&search_term], |row| {
+            Ok(LocationWithAssetCount {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                address: row.get(2)?,
+                latitude: row.get(3)?,
+                longitude: row.get(4)?,
+                description: row.get(5)?,
+                parent_location_id: row.get(6)?,
+                created_by: row.get(7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+                asset_count: row.get(10)?,
+            })
+        })?;
+
+        let mut locations = Vec::new();
+        for location in location_iter {
+            locations.push(location?);
+        }
+
+        let total_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM locations
+             WHERE name LIKE ?1 OR address LIKE ?1 OR description LIKE ?1",
+            [&search_term],
+            |row| row.get(0),
+        )?;
+
+        drop(stmt);
+        self.database.return_connection(conn);
+        Ok(PaginatedResult::new(locations, total_count, filter.page.unwrap_or(1), limit))
+    }
+
+    fn row_to_location(&self, row: &Row) -> rusqlite::Result<Location> {
+        Ok(Location {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            address: row.get(2)?,
+            latitude: row.get(3)?,
+            longitude: row.get(4)?,
+            description: row.get(5)?,
+            parent_location_id: row.get(6)?,
+            created_by: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    }
+}
+
+// =============================================================================
 // Main Services Struct
 // =============================================================================
 
 pub struct Services {
-    pub assets: AssetService,
-    pub inspections: InspectionService,
-    pub compliance: ComplianceService,
-    pub users: UserService,
-    pub media: MediaService,
-    pub reports: ReportService,
+    pub assets: Arc<AssetService>,
+    pub inspections: Arc<InspectionService>,
+    pub compliance: Arc<ComplianceService>,
+    pub users: Arc<UserService>,
+    pub media: Arc<MediaService>,
+    pub reports: Arc<ReportService>,
+    pub locations: Arc<LocationService>,
 }
 
 impl Services {
     pub async fn init(database: Arc<Database>) -> AppResult<Self> {
         info!("Initializing services layer");
         
-        let assets = AssetService::new(database.clone());
-        let inspections = InspectionService::new(database.clone());
-        let compliance = ComplianceService::new(database.clone());
-        let users = UserService::new(database.clone());
-        let media = MediaService::new(database.clone());
-        let reports = ReportService::new(database.clone());
+        let assets = Arc::new(AssetService::new(database.clone()));
+        let inspections = Arc::new(InspectionService::new(database.clone()));
+        let compliance = Arc::new(ComplianceService::new(database.clone()));
+        let users = Arc::new(UserService::new(database.clone()));
+        let media = Arc::new(MediaService::new(database.clone()));
+        let reports = Arc::new(ReportService::new(database.clone()));
+        let locations = Arc::new(LocationService::new(database.clone(), assets.clone()));
         
         info!("Services layer initialized successfully");
         Ok(Services {
@@ -2493,6 +3419,7 @@ impl Services {
             users,
             media,
             reports,
+            locations,
         })
     }
 }

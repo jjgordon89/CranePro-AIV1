@@ -14,7 +14,7 @@ use log::{info, debug};
 const POOL_SIZE: usize = 10;
 
 /// Current database schema version
-const CURRENT_SCHEMA_VERSION: i32 = 1;
+const CURRENT_SCHEMA_VERSION: i32 = 2;
 
 /// Database connection pool
 pub struct DatabasePool {
@@ -262,6 +262,14 @@ impl LegacyMigrationManager {
             description: "Initial schema creation".to_string(),
             up_sql: INITIAL_SCHEMA.to_string(),
             down_sql: "".to_string(), // Initial migration cannot be rolled back
+        });
+
+        // Add location hierarchy and asset tracking migration
+        migrations.push(LegacyMigration {
+            version: 2,
+            description: "Location hierarchy and asset tracking features".to_string(),
+            up_sql: LOCATION_HIERARCHY_MIGRATION.to_string(),
+            down_sql: LOCATION_HIERARCHY_ROLLBACK.to_string(),
         });
 
         LegacyMigrationManager { migrations }
@@ -567,4 +575,158 @@ INSERT INTO compliance_standards (standard_code, standard_name, version, require
 -- Insert default admin user (password: admin123 - should be changed in production)
 INSERT INTO users (username, email, password_hash, role, first_name, last_name, is_active) VALUES
 ('admin', 'admin@cranepro.com', '$2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/lewf5FuiOJ/rZNpyC', 'SuperAdmin', 'System', 'Administrator', 1);
+"#;
+/// Location hierarchy and asset tracking migration SQL
+const LOCATION_HIERARCHY_MIGRATION: &str = r#"
+-- Add parent_location_id column to locations table for hierarchy support
+ALTER TABLE locations ADD COLUMN parent_location_id INTEGER REFERENCES locations(id);
+
+-- Create indexes for location hierarchy and GPS queries
+CREATE INDEX idx_locations_parent_id ON locations(parent_location_id);
+CREATE INDEX idx_locations_coordinates ON locations(latitude, longitude);
+
+-- Asset location history tracking table
+CREATE TABLE asset_location_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id INTEGER NOT NULL,
+    from_location_id INTEGER,
+    to_location_id INTEGER NOT NULL,
+    changed_by INTEGER NOT NULL,
+    change_reason TEXT,
+    change_date DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES assets(id),
+    FOREIGN KEY (from_location_id) REFERENCES locations(id),
+    FOREIGN KEY (to_location_id) REFERENCES locations(id),
+    FOREIGN KEY (changed_by) REFERENCES users(id)
+);
+
+-- Location capacity management table
+CREATE TABLE location_capacity_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    location_id INTEGER NOT NULL UNIQUE,
+    max_total_assets INTEGER,
+    max_asset_value REAL,
+    physical_space_limit REAL,
+    capacity_rules JSON,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (location_id) REFERENCES locations(id)
+);
+
+-- Create indexes for asset location history performance
+CREATE INDEX idx_asset_location_history_asset_id ON asset_location_history(asset_id);
+CREATE INDEX idx_asset_location_history_from_location ON asset_location_history(from_location_id);
+CREATE INDEX idx_asset_location_history_to_location ON asset_location_history(to_location_id);
+CREATE INDEX idx_asset_location_history_change_date ON asset_location_history(change_date);
+
+-- Create indexes for location capacity settings
+CREATE INDEX idx_location_capacity_location_id ON location_capacity_settings(location_id);
+
+-- Create trigger to prevent location hierarchy cycles
+CREATE TRIGGER prevent_location_hierarchy_cycle
+    BEFORE UPDATE OF parent_location_id ON locations
+    FOR EACH ROW
+    WHEN NEW.parent_location_id IS NOT NULL
+    BEGIN
+        SELECT CASE
+            WHEN EXISTS (
+                WITH RECURSIVE location_path(id, parent_id, depth) AS (
+                    SELECT NEW.parent_location_id, parent_location_id, 0
+                    FROM locations WHERE id = NEW.parent_location_id
+                    UNION ALL
+                    SELECT l.id, l.parent_location_id, lp.depth + 1
+                    FROM locations l
+                    JOIN location_path lp ON l.id = lp.parent_id
+                    WHERE lp.depth < 10 AND l.parent_location_id IS NOT NULL
+                )
+                SELECT 1 FROM location_path WHERE id = NEW.id
+            ) THEN
+                RAISE(ABORT, 'Location hierarchy cycle detected')
+        END;
+    END;
+
+-- Create trigger to prevent location hierarchy cycles on INSERT
+CREATE TRIGGER prevent_location_hierarchy_cycle_insert
+    BEFORE INSERT ON locations
+    FOR EACH ROW
+    WHEN NEW.parent_location_id IS NOT NULL
+    BEGIN
+        SELECT CASE
+            WHEN EXISTS (
+                WITH RECURSIVE location_path(id, parent_id, depth) AS (
+                    SELECT NEW.parent_location_id, parent_location_id, 0
+                    FROM locations WHERE id = NEW.parent_location_id
+                    UNION ALL
+                    SELECT l.id, l.parent_location_id, lp.depth + 1
+                    FROM locations l
+                    JOIN location_path lp ON l.id = lp.parent_id
+                    WHERE lp.depth < 10 AND l.parent_location_id IS NOT NULL
+                )
+                SELECT 1 FROM location_path WHERE id = NEW.id
+            ) THEN
+                RAISE(ABORT, 'Location hierarchy cycle detected')
+        END;
+    END;
+
+-- Create trigger for updating location_capacity_settings timestamps
+CREATE TRIGGER update_location_capacity_settings_timestamp 
+    AFTER UPDATE ON location_capacity_settings 
+    FOR EACH ROW 
+    BEGIN 
+        UPDATE location_capacity_settings SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id; 
+    END;
+
+-- Create trigger to automatically log asset location changes
+CREATE TRIGGER log_asset_location_change
+    AFTER UPDATE OF location_id ON assets
+    FOR EACH ROW
+    WHEN OLD.location_id != NEW.location_id
+    BEGIN
+        INSERT INTO asset_location_history (
+            asset_id, 
+            from_location_id, 
+            to_location_id, 
+            changed_by, 
+            change_reason, 
+            change_date
+        ) VALUES (
+            NEW.id, 
+            OLD.location_id, 
+            NEW.location_id, 
+            1, -- Default to admin user, should be updated by application logic
+            'Asset location updated', 
+            CURRENT_TIMESTAMP
+        );
+    END;
+"#;
+
+/// Location hierarchy rollback migration SQL
+const LOCATION_HIERARCHY_ROLLBACK: &str = r#"
+-- Drop triggers
+DROP TRIGGER IF EXISTS log_asset_location_change;
+DROP TRIGGER IF EXISTS update_location_capacity_settings_timestamp;
+DROP TRIGGER IF EXISTS prevent_location_hierarchy_cycle_insert;
+DROP TRIGGER IF EXISTS prevent_location_hierarchy_cycle;
+
+-- Drop indexes for location capacity settings
+DROP INDEX IF EXISTS idx_location_capacity_location_id;
+
+-- Drop indexes for asset location history
+DROP INDEX IF EXISTS idx_asset_location_history_change_date;
+DROP INDEX IF EXISTS idx_asset_location_history_to_location;
+DROP INDEX IF EXISTS idx_asset_location_history_from_location;
+DROP INDEX IF EXISTS idx_asset_location_history_asset_id;
+
+-- Drop new tables
+DROP TABLE IF EXISTS location_capacity_settings;
+DROP TABLE IF EXISTS asset_location_history;
+
+-- Drop location indexes
+DROP INDEX IF EXISTS idx_locations_coordinates;
+DROP INDEX IF EXISTS idx_locations_parent_id;
+
+-- Remove parent_location_id column from locations table
+-- Note: SQLite doesn't support DROP COLUMN directly, so we would need to recreate the table
+-- For simplicity in this rollback, we'll leave the column but set all values to NULL
+UPDATE locations SET parent_location_id = NULL;
 "#;

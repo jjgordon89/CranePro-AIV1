@@ -106,6 +106,13 @@ impl Permissions {
     pub const REPORT_READ: &'static str = "report:read";
     pub const REPORT_ALL: &'static str = "report:*";
 
+    // Location permissions
+    pub const LOCATION_CREATE: &'static str = "location:create";
+    pub const LOCATION_READ: &'static str = "location:read";
+    pub const LOCATION_UPDATE: &'static str = "location:update";
+    pub const LOCATION_DELETE: &'static str = "location:delete";
+    pub const LOCATION_ALL: &'static str = "location:*";
+
     // System permissions
     pub const SYSTEM_ADMIN: &'static str = "system:admin";
     pub const SYSTEM_ALL: &'static str = "*";
@@ -123,6 +130,7 @@ impl Permissions {
                 Self::MEDIA_UPLOAD.to_string(),
                 Self::MEDIA_READ.to_string(),
                 Self::REPORT_READ.to_string(),
+                Self::LOCATION_READ.to_string(),
             ],
             UserRole::Supervisor => vec![
                 Self::ASSET_READ.to_string(),
@@ -133,6 +141,8 @@ impl Permissions {
                 Self::USER_READ.to_string(),
                 Self::MEDIA_ALL.to_string(),
                 Self::REPORT_ALL.to_string(),
+                Self::LOCATION_READ.to_string(),
+                Self::LOCATION_UPDATE.to_string(),
             ],
             UserRole::Administrator => vec![
                 Self::ASSET_ALL.to_string(),
@@ -143,6 +153,7 @@ impl Permissions {
                 Self::USER_UPDATE.to_string(),
                 Self::MEDIA_ALL.to_string(),
                 Self::REPORT_ALL.to_string(),
+                Self::LOCATION_ALL.to_string(),
             ],
             UserRole::SuperAdmin => vec![
                 Self::SYSTEM_ALL.to_string(),

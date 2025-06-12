@@ -342,3 +342,62 @@ impl UploadFileRequest {
         }
     }
 }
+
+// =============================================================================
+// Location Management Requests
+// =============================================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CreateLocationRequest {
+    pub name: String,
+    pub address: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub description: Option<String>,
+    pub parent_location_id: Option<i64>,
+    pub created_by: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LocationUpdateRequest {
+    pub name: Option<String>,
+    pub address: Option<String>,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub description: Option<String>,
+    pub parent_location_id: Option<Option<i64>>, // Note: nested Option for nullability
+}
+
+// =============================================================================
+// Location Helper Functions
+// =============================================================================
+
+impl CreateLocationRequest {
+    pub fn to_location(self) -> Location {
+        Location {
+            id: 0, // Will be set by database
+            name: self.name,
+            address: self.address,
+            latitude: self.latitude,
+            longitude: self.longitude,
+            description: self.description,
+            parent_location_id: self.parent_location_id,
+            created_by: self.created_by,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+impl From<LocationUpdateRequest> for LocationUpdateData {
+    fn from(req: LocationUpdateRequest) -> Self {
+        LocationUpdateData {
+            name: req.name,
+            address: req.address,
+            latitude: req.latitude,
+            longitude: req.longitude,
+            description: req.description,
+            parent_location_id: req.parent_location_id,
+        }
+    }
+}
