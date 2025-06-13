@@ -711,14 +711,16 @@ impl AssetService {
             match asset.validate() {
                 Ok(_) => {
                     // Check if location exists
-                    let location_exists = self.database.with_connection(|conn| {
+                    let location_exists = {
+                        let conn = self.database.get_connection()?;
                         let count: i64 = conn.query_row(
                             "SELECT COUNT(*) FROM locations WHERE id = ?1",
                             params![asset.location_id],
                             |row| row.get(0),
                         )?;
-                        Ok(count > 0)
-                    })?;
+                        self.database.return_connection(conn);
+                        count > 0
+                    };
 
                     if !location_exists {
                         failed_imports += 1;
@@ -837,12 +839,14 @@ impl AssetService {
         let _asset = self.get_asset_by_id(asset_id)?;
         
         // Check if location exists
-        self.database.with_connection(|conn| {
+        {
+            let conn = self.database.get_connection()?;
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM locations WHERE id = ?1",
                 params![location_id],
                 |row| row.get(0),
             )?;
+            self.database.return_connection(conn);
             
             if count == 0 {
                 return Err(AppError::RecordNotFound {
@@ -851,8 +855,7 @@ impl AssetService {
                     value: location_id.to_string(),
                 });
             }
-            Ok(())
-        })?;
+        }
         
         debug!("Asset-location assignment validation successful");
         Ok(())
@@ -3423,3 +3426,7 @@ impl Services {
         })
     }
 }
+
+// Test modules
+#[cfg(test)]
+pub mod tests;

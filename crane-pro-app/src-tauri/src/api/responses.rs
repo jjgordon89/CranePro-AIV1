@@ -426,3 +426,319 @@ pub struct LocationFilterOption {
     pub name: String,
     pub asset_count: i64,
 }
+
+// =============================================================================
+// Enhanced Asset Management Responses
+// =============================================================================
+
+/// Enhanced asset summary response with computed fields for frontend display
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AssetSummaryResponse {
+    #[serde(flatten)]
+    pub summary: crate::services::AssetSummary,
+    // Enhanced fields for frontend
+    /// Color-coded status indicator (green, yellow, red)
+    pub status_indicator: String,
+    /// Human-readable compliance level (Excellent, Good, Fair, Poor)
+    pub compliance_level: String,
+    /// Next action required with description
+    pub next_action_required: Option<String>,
+    /// Formatted date strings for display
+    pub formatted_dates: FormattedDates,
+    /// Human-readable maintenance status
+    pub maintenance_status: String,
+}
+
+/// Formatted date strings for frontend display
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FormattedDates {
+    pub last_inspection: Option<String>,
+    pub next_inspection: Option<String>,
+    pub last_maintenance: Option<String>,
+    pub next_maintenance: Option<String>,
+}
+
+impl From<crate::services::AssetSummary> for AssetSummaryResponse {
+    fn from(summary: crate::services::AssetSummary) -> Self {
+        // Determine status indicator color
+        let status_indicator = match summary.status {
+            AssetStatus::Active => "green".to_string(),
+            AssetStatus::Maintenance => "yellow".to_string(),
+            AssetStatus::Decommissioned => "gray".to_string(),
+            AssetStatus::Inactive => "red".to_string(),
+        };
+
+        // Determine compliance level
+        let compliance_level = if summary.compliance_score >= 90.0 {
+            "Excellent".to_string()
+        } else if summary.compliance_score >= 80.0 {
+            "Good".to_string()
+        } else if summary.compliance_score >= 60.0 {
+            "Fair".to_string()
+        } else {
+            "Poor".to_string()
+        };
+
+        // Determine next action required
+        let next_action_required = if summary.pending_inspections > 0 {
+            Some("Schedule pending inspection".to_string())
+        } else if summary.critical_findings_count > 0 {
+            Some("Address critical findings".to_string())
+        } else if summary.next_inspection_date.map_or(false, |date| date <= Utc::now() + chrono::Duration::days(7)) {
+            Some("Upcoming inspection due".to_string())
+        } else {
+            None
+        };
+
+        // Format dates for display
+        let formatted_dates = FormattedDates {
+            last_inspection: summary.last_inspection_date.map(|d| d.format("%Y-%m-%d").to_string()),
+            next_inspection: summary.next_inspection_date.map(|d| d.format("%Y-%m-%d").to_string()),
+            last_maintenance: summary.last_maintenance_date.map(|d| d.format("%Y-%m-%d").to_string()),
+            next_maintenance: summary.next_maintenance_date.map(|d| d.format("%Y-%m-%d").to_string()),
+        };
+
+        // Determine maintenance status
+        let maintenance_status = if summary.maintenance_records_count == 0 {
+            "No maintenance history".to_string()
+        } else if summary.last_maintenance_date.map_or(true, |date| date < Utc::now() - chrono::Duration::days(365)) {
+            "Maintenance overdue".to_string()
+        } else {
+            "Up to date".to_string()
+        };
+
+        Self {
+            summary,
+            status_indicator,
+            compliance_level,
+            next_action_required,
+            formatted_dates,
+            maintenance_status,
+        }
+    }
+}
+
+/// Enhanced bulk import result response with user-friendly information
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BulkImportResultResponse {
+    #[serde(flatten)]
+    pub result: crate::services::BulkImportResult,
+    // Enhanced fields for frontend
+    /// Success rate as a percentage (0.0 to 100.0)
+    pub success_rate: f64,
+    /// Processing time in milliseconds
+    pub processing_time_ms: i64,
+    /// User-friendly error messages with suggestions
+    pub user_friendly_errors: Vec<UserFriendlyError>,
+    /// Overall summary message for the import operation
+    pub summary_message: String,
+    /// Recommendations for addressing failures
+    pub recommendations: Vec<String>,
+}
+
+/// User-friendly error information for failed imports
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserFriendlyError {
+    /// Reference to the asset that failed (asset number or identifier)
+    pub asset_reference: String,
+    /// Category of error (validation, duplicate, system)
+    pub error_type: String,
+    /// Human-readable error message
+    pub message: String,
+    /// Suggested action to resolve the error
+    pub suggestion: Option<String>,
+    /// Field that caused the error (if applicable)
+    pub field: Option<String>,
+}
+
+impl From<crate::services::BulkImportResult> for BulkImportResultResponse {
+    fn from(result: crate::services::BulkImportResult) -> Self {
+        let success_rate = if result.total_processed > 0 {
+            (result.successful_imports as f64 / result.total_processed as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Generate user-friendly errors
+        let mut user_friendly_errors = Vec::new();
+        let mut recommendations = Vec::new();
+        
+        for asset_result in &result.results {
+            if !asset_result.success {
+                if let Some(error_msg) = &asset_result.error_message {
+                    let (error_type, suggestion) = if error_msg.contains("duplicate") {
+                        ("duplicate".to_string(), Some("Check for existing asset with same number".to_string()))
+                    } else if error_msg.contains("location") {
+                        ("validation".to_string(), Some("Verify location exists or create it first".to_string()))
+                    } else if error_msg.contains("validation") {
+                        ("validation".to_string(), Some("Check required fields are populated".to_string()))
+                    } else {
+                        ("system".to_string(), Some("Contact system administrator".to_string()))
+                    };
+
+                    user_friendly_errors.push(UserFriendlyError {
+                        asset_reference: asset_result.asset_number.clone(),
+                        error_type: error_type.clone(),
+                        message: error_msg.clone(),
+                        suggestion,
+                        field: None, // Could be enhanced to parse field from error message
+                    });
+                }
+            }
+        }
+
+        // Generate recommendations
+        if result.failed_imports > 0 {
+            if user_friendly_errors.iter().any(|e| e.error_type == "duplicate") {
+                recommendations.push("Review duplicate asset numbers and update them to be unique".to_string());
+            }
+            if user_friendly_errors.iter().any(|e| e.error_type == "validation") {
+                recommendations.push("Validate all required fields are populated before import".to_string());
+            }
+            if user_friendly_errors.iter().any(|e| e.message.contains("location")) {
+                recommendations.push("Create missing locations or verify location IDs".to_string());
+            }
+        }
+
+        let summary_message = if result.failed_imports == 0 {
+            format!("All {} assets imported successfully", result.successful_imports)
+        } else if result.successful_imports == 0 {
+            format!("Import failed: {} assets could not be imported", result.failed_imports)
+        } else {
+            format!("Partial success: {} of {} assets imported successfully",
+                   result.successful_imports, result.total_processed)
+        };
+
+        Self {
+            result,
+            success_rate,
+            processing_time_ms: 0, // Would be populated by the actual import process
+            user_friendly_errors,
+            summary_message,
+            recommendations,
+        }
+    }
+}
+
+/// Enhanced asset compliance summary with risk assessment and actionable items
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AssetComplianceSummaryResponse {
+    #[serde(flatten)]
+    pub compliance: crate::services::AssetComplianceSummary,
+    // Enhanced fields for frontend
+    /// Visual compliance indicator with color and icon
+    pub compliance_indicator: ComplianceIndicator,
+    /// Risk level assessment
+    pub risk_level: RiskLevel,
+    /// List of actionable items to improve compliance
+    pub actionable_items: Vec<ActionableItem>,
+    /// Compliance trend indicator (improving, stable, declining)
+    pub compliance_trend: Option<String>,
+}
+
+/// Visual indicator for compliance status
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ComplianceIndicator {
+    /// Color code for display (green, yellow, red)
+    pub color: String,
+    /// Icon name for display
+    pub icon: String,
+    /// Label text
+    pub label: String,
+}
+
+/// Risk level enumeration
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum RiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+/// Actionable item for improving compliance
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ActionableItem {
+    /// Priority level (high, medium, low)
+    pub priority: String,
+    /// Description of the action needed
+    pub action: String,
+    /// Due date for the action
+    pub due_date: Option<DateTime<Utc>>,
+    /// Person or role responsible for the action
+    pub responsible_party: Option<String>,
+}
+
+impl From<crate::services::AssetComplianceSummary> for AssetComplianceSummaryResponse {
+    fn from(compliance: crate::services::AssetComplianceSummary) -> Self {
+        // Determine compliance indicator
+        let compliance_indicator = if compliance.overall_compliance_score >= 80.0 {
+            ComplianceIndicator {
+                color: "green".to_string(),
+                icon: "check-circle".to_string(),
+                label: "Compliant".to_string(),
+            }
+        } else if compliance.overall_compliance_score >= 60.0 {
+            ComplianceIndicator {
+                color: "yellow".to_string(),
+                icon: "warning".to_string(),
+                label: "At Risk".to_string(),
+            }
+        } else {
+            ComplianceIndicator {
+                color: "red".to_string(),
+                icon: "x-circle".to_string(),
+                label: "Non-Compliant".to_string(),
+            }
+        };
+
+        // Determine risk level
+        let risk_level = if compliance.critical_findings > 0 {
+            RiskLevel::Critical
+        } else if compliance.overdue_inspections > 0 {
+            RiskLevel::High
+        } else if compliance.overall_compliance_score < 70.0 {
+            RiskLevel::Medium
+        } else {
+            RiskLevel::Low
+        };
+
+        // Generate actionable items
+        let mut actionable_items = Vec::new();
+        
+        if compliance.overdue_inspections > 0 {
+            actionable_items.push(ActionableItem {
+                priority: "high".to_string(),
+                action: format!("Schedule {} overdue inspection(s)", compliance.overdue_inspections),
+                due_date: Some(Utc::now() + chrono::Duration::days(7)),
+                responsible_party: Some("Inspection Manager".to_string()),
+            });
+        }
+
+        if compliance.critical_findings > 0 {
+            actionable_items.push(ActionableItem {
+                priority: "critical".to_string(),
+                action: format!("Address {} critical finding(s)", compliance.critical_findings),
+                due_date: Some(Utc::now() + chrono::Duration::days(3)),
+                responsible_party: Some("Maintenance Team".to_string()),
+            });
+        }
+
+        if compliance.overall_compliance_score < 80.0 {
+            actionable_items.push(ActionableItem {
+                priority: "medium".to_string(),
+                action: "Review and improve compliance procedures".to_string(),
+                due_date: Some(Utc::now() + chrono::Duration::days(30)),
+                responsible_party: Some("Compliance Officer".to_string()),
+            });
+        }
+
+        Self {
+            compliance,
+            compliance_indicator,
+            risk_level,
+            actionable_items,
+            compliance_trend: None, // Would require historical data to determine trend
+        }
+    }
+}

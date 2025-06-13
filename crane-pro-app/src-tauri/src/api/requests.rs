@@ -4,6 +4,7 @@
 //! to receive data from the frontend.
 
 use crate::models::*;
+use crate::api::DateRange;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc, NaiveDate};
 use serde_json::Value as JsonValue;
@@ -400,4 +401,94 @@ impl From<LocationUpdateRequest> for LocationUpdateData {
             parent_location_id: req.parent_location_id,
         }
     }
+}
+
+// =============================================================================
+// Additional Asset Management Requests
+// =============================================================================
+
+/// Request for filtering assets by status with pagination and date range support
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AssetStatusFilterRequest {
+    /// The asset status to filter by
+    pub status: AssetStatus,
+    /// Whether to include inactive assets in results
+    pub include_inactive: bool,
+    /// Optional date range for filtering by creation/update dates
+    pub date_range: Option<DateRange>,
+    /// Page number for pagination (1-based)
+    pub page: Option<i64>,
+    /// Number of items per page
+    pub limit: Option<i64>,
+}
+
+impl Into<crate::services::AssetStatusFilter> for AssetStatusFilterRequest {
+    fn into(self) -> crate::services::AssetStatusFilter {
+        crate::services::AssetStatusFilter {
+            status: self.status,
+            include_inactive: self.include_inactive,
+        }
+    }
+}
+
+/// Request for transferring an asset from one location to another
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AssetTransferRequest {
+    /// ID of the asset to transfer
+    pub asset_id: i64,
+    /// ID of the current location (source)
+    pub source_location_id: i64,
+    /// ID of the destination location (target)
+    pub target_location_id: i64,
+    /// Reason for the transfer
+    pub transfer_reason: String,
+    /// Optional scheduled transfer date (defaults to now)
+    pub transfer_date: Option<DateTime<Utc>>,
+    /// ID of the user performing the transfer
+    pub transferred_by: i64,
+}
+
+impl Into<crate::services::AssetTransferRequest> for AssetTransferRequest {
+    fn into(self) -> crate::services::AssetTransferRequest {
+        crate::services::AssetTransferRequest {
+            asset_id: self.asset_id,
+            from_location_id: self.source_location_id,
+            to_location_id: self.target_location_id,
+            transfer_reason: self.transfer_reason,
+            transferred_by: self.transferred_by,
+        }
+    }
+}
+
+/// Request for bulk importing multiple assets with validation options
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct BulkAssetImportRequest {
+    /// List of assets to import
+    pub assets: Vec<CreateAssetRequest>,
+    /// Validation options for the import process
+    pub validation_options: ImportValidationOptions,
+    /// Import behavior settings
+    pub import_settings: ImportSettings,
+}
+
+/// Validation options for bulk asset import
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImportValidationOptions {
+    /// Skip assets with duplicate asset numbers
+    pub skip_duplicates: bool,
+    /// Validate that all referenced locations exist
+    pub validate_locations: bool,
+    /// Require all mandatory fields to be populated
+    pub require_all_fields: bool,
+}
+
+/// Settings that control import behavior
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ImportSettings {
+    /// Optional batch size for processing (defaults to all at once)
+    pub batch_size: Option<i64>,
+    /// Continue processing if individual asset import fails
+    pub continue_on_error: bool,
+    /// Create missing locations automatically if they don't exist
+    pub create_missing_locations: bool,
 }

@@ -11,8 +11,34 @@ pub mod requests;
 pub mod responses;
 
 // Re-export common types
-pub use requests::*;
-pub use responses::*;
+pub use requests::{
+    // Existing request types
+    CreateAssetRequest, AssetUpdateRequest, CreateComponentRequest, ComponentUpdateRequest,
+    CreateInspectionRequest, InspectionUpdateRequest, CreateInspectionItemRequest, InspectionItemUpdateRequest,
+    CreateComplianceRecordRequest, ComplianceRecordUpdateRequest,
+    CreateUserRequest, UserUpdateRequest, LoginRequest, ChangePasswordRequest,
+    UploadFileRequest, MediaFileUpdateRequest,
+    CreateLocationRequest, LocationUpdateRequest,
+    // New request types
+    AssetStatusFilterRequest, AssetTransferRequest, BulkAssetImportRequest,
+    ImportValidationOptions, ImportSettings,
+};
+
+pub use responses::{
+    // Existing response types
+    PaginatedResponse, PaginationMeta, SuccessResponse,
+    AssetResponse, ComponentResponse,
+    InspectionResponse, InspectionItemResponse,
+    ComplianceRecordResponse, ComplianceStatusResponse, ComplianceRequirementResponse,
+    UserResponse, LoginResponse,
+    MediaFileResponse, UploadResponse,
+    ReportResponse, ReportTemplateResponse, ReportParameterResponse,
+    DashboardStatsResponse, ActivityResponse, UpcomingInspectionResponse,
+    SearchResponse, FilterOptionsResponse, LocationFilterOption,
+    // New response types
+    AssetSummaryResponse, BulkImportResultResponse, AssetComplianceSummaryResponse,
+    FormattedDates, UserFriendlyError, ComplianceIndicator, RiskLevel, ActionableItem,
+};
 
 /// Standard API response wrapper for all command handlers
 #[derive(Debug, Serialize, Deserialize)]
@@ -126,15 +152,6 @@ pub struct ComplianceRequirement {
     pub description: String,
 }
 
-/// Login response with user session data
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LoginResponse {
-    pub user: crate::models::User,
-    pub token: String,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub permissions: Vec<String>,
-    pub session_id: String,
-}
 
 /// Common query filter for paginated endpoints
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -164,3 +181,7 @@ impl From<QueryFilterRequest> for crate::models::QueryFilter {
         }
     }
 }
+
+// Test modules
+#[cfg(test)]
+pub mod tests;

@@ -12,6 +12,10 @@ pub mod api;
 pub mod middleware;
 pub mod commands;
 
+// Test infrastructure
+#[cfg(test)]
+pub mod test_fixtures;
+
 use crate::errors::AppResult;
 use crate::database::Database;
 use crate::services::Services;
@@ -24,6 +28,7 @@ use crate::commands::{
     create_asset_command, get_asset_command, get_assets_by_location_command,
     update_asset_command, delete_asset_command, search_assets_command,
     get_asset_components_command, create_component_command, update_component_command,
+    validate_asset_assignment_command,
     
     // Inspection commands
     create_inspection_command, get_inspection_command, update_inspection_command,
@@ -120,7 +125,7 @@ pub fn run() {
             greet,
             health_check,
             
-            // Asset management commands (9 commands)
+            // Asset management commands (10 commands)
             create_asset_command,
             get_asset_command,
             get_assets_by_location_command,
@@ -130,6 +135,7 @@ pub fn run() {
             get_asset_components_command,
             create_component_command,
             update_component_command,
+            validate_asset_assignment_command,
             
             // Inspection management commands (9 commands)
             create_inspection_command,

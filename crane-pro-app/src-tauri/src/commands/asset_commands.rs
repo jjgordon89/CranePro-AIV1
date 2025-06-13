@@ -8,7 +8,8 @@ use crate::api::{ApiResponse, QueryFilterRequest, CreateAssetRequest, AssetUpdat
 use crate::commands::AppState;
 use crate::middleware::auth::AuthHelper;
 use crate::models::{Asset, Component};
-use crate::services::AssetUpdateData;
+use crate::services::{AssetUpdateData, AssetSummary, BulkImportResult, AssetStatusFilter,
+                     AssetComplianceSummary, AssetTransferRequest, MaintenanceHistoryEntry};
 use crate::{require_resource_access, time_command, command_handler};
 use tauri::State;
 use log::{info, debug};
@@ -313,5 +314,205 @@ pub async fn update_component_command(
 
     Ok(command_handler!("update_component", 
                        result.as_ref().ok().and_then(|_| None), 
+                       { result }))
+}
+
+/// Get comprehensive asset summary including inspections, maintenance, and compliance data
+#[tauri::command]
+pub async fn get_asset_summary_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    asset_id: i64,
+) -> Result<ApiResponse<AssetSummary>, String> {
+    let result = time_command!("get_asset_summary", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "read");
+
+        // Call service method
+        let summary = state.services.assets.get_asset_summary(asset_id)
+            .map_err(|e| format!("Failed to get asset summary: {}", e))?;
+
+        debug!("Asset summary retrieved for asset: {}", asset_id);
+        Ok(summary)
+    });
+
+    Ok(command_handler!("get_asset_summary",
+                       result.as_ref().ok().and_then(|_| None),
+                       { result }))
+}
+
+/// Bulk import assets with validation and transaction handling
+#[tauri::command]
+pub async fn bulk_import_assets_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    assets: Vec<Asset>,
+) -> Result<ApiResponse<BulkImportResult>, String> {
+    let result = time_command!("bulk_import_assets", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "create");
+
+        // Call service method
+        let import_result = state.services.assets.bulk_import_assets(assets.clone())
+            .map_err(|e| format!("Failed to bulk import assets: {}", e))?;
+
+        info!("Bulk import completed: {}/{} successful",
+              import_result.successful_imports, import_result.total_processed);
+        Ok(import_result)
+    });
+
+    Ok(command_handler!("bulk_import_assets",
+                       result.as_ref().ok().and_then(|_| None),
+                       { result }))
+}
+
+/// Get maintenance history for a specific asset
+#[tauri::command]
+pub async fn get_asset_maintenance_history_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    asset_id: i64,
+) -> Result<ApiResponse<Vec<MaintenanceHistoryEntry>>, String> {
+    let result = time_command!("get_asset_maintenance_history", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "read");
+
+        // Call service method
+        let maintenance_history = state.services.assets.get_asset_maintenance_history(asset_id)
+            .map_err(|e| format!("Failed to get asset maintenance history: {}", e))?;
+
+        debug!("Maintenance history retrieved for asset: {} ({} records)",
+               asset_id, maintenance_history.len());
+        Ok(maintenance_history)
+    });
+
+    Ok(command_handler!("get_asset_maintenance_history",
+                       result.as_ref().ok().and_then(|_| None),
+                       { result }))
+}
+
+/// Validate asset-location assignment
+#[tauri::command]
+pub async fn validate_asset_assignment_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    asset_id: i64,
+    location_id: i64,
+) -> Result<ApiResponse<()>, String> {
+    let result = time_command!("validate_asset_location_assignment", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "read");
+
+        // Call service method
+        state.services.assets.validate_asset_location_assignment(asset_id, location_id)
+            .map_err(|e| format!("Failed to validate asset location assignment: {}", e))?;
+
+        debug!("Asset-location assignment validated: asset={}, location={}",
+               asset_id, location_id);
+        Ok(())
+    });
+
+    Ok(command_handler!("validate_asset_location_assignment",
+                       result.as_ref().ok().and_then(|_| None),
+                       { result }))
+}
+
+/// Get assets filtered by status with pagination
+#[tauri::command]
+pub async fn get_assets_by_status_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    status_filter: AssetStatusFilter,
+    filter: QueryFilterRequest,
+) -> Result<ApiResponse<PaginatedResponse<Asset>>, String> {
+    let result = time_command!("get_assets_by_status", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "read");
+
+        // Convert request to service filter
+        let query_filter = filter.into();
+        let paginated_assets = state.services.assets.get_assets_by_status(status_filter.clone(), query_filter)
+            .map_err(|e| format!("Failed to get assets by status: {}", e))?;
+
+        debug!("Retrieved {} assets for status filter: {:?}",
+               paginated_assets.data.len(), status_filter);
+
+        let response = PaginatedResponse::from(paginated_assets);
+        Ok(response)
+    });
+
+    Ok(command_handler!("get_assets_by_status",
+                       result.as_ref().ok().and_then(|_| None),
+                       { result }))
+}
+
+/// Get compliance summary for a specific asset
+#[tauri::command]
+pub async fn get_asset_compliance_summary_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    asset_id: i64,
+) -> Result<ApiResponse<AssetComplianceSummary>, String> {
+    let result = time_command!("get_asset_compliance_summary", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "read");
+
+        // Call service method
+        let compliance_summary = state.services.assets.get_asset_compliance_summary(asset_id)
+            .map_err(|e| format!("Failed to get asset compliance summary: {}", e))?;
+
+        debug!("Asset compliance summary retrieved for asset: {}", asset_id);
+        Ok(compliance_summary)
+    });
+
+    Ok(command_handler!("get_asset_compliance_summary",
+                       result.as_ref().ok().and_then(|_| None),
+                       { result }))
+}
+
+/// Transfer asset from one location to another with validation and audit logging
+#[tauri::command]
+pub async fn transfer_asset_location_command(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    transfer_request: AssetTransferRequest,
+) -> Result<ApiResponse<Asset>, String> {
+    let result = time_command!("transfer_asset_location", {
+        // Authenticate and authorize
+        let context = AuthHelper::validate_request(&state.auth_manager, token)
+            .map_err(|e| format!("Authentication failed: {}", e))?;
+        
+        require_resource_access!(context, "asset", "update");
+
+        // Call service method
+        let updated_asset = state.services.assets.transfer_asset_location(transfer_request.clone())
+            .map_err(|e| format!("Failed to transfer asset location: {}", e))?;
+
+        info!("Asset transferred: {} from location {} to location {} by user {}",
+              transfer_request.asset_id, transfer_request.from_location_id,
+              transfer_request.to_location_id, transfer_request.transferred_by);
+        Ok(updated_asset)
+    });
+
+    Ok(command_handler!("transfer_asset_location",
+                       result.as_ref().ok().and_then(|_| None),
                        { result }))
 }

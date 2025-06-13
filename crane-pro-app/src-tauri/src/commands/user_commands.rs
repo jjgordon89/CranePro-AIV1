@@ -202,7 +202,7 @@ pub async fn login_command(
         // Get user details (without password hash)
         let user = state.services.users.get_user_by_id(session.user_id)
             .map_err(|e| format!("Failed to get user details: {}", e))?;        let login_response = LoginResponse {
-            user: user,
+            user: user.into(),
             token,
             expires_at: session.expires_at,
             permissions: session.permissions.clone(),

@@ -132,3 +132,7 @@ impl<T> WithMetadata<T> for T {
         CommandResponse::new(self, request_id)
     }
 }
+
+// Test modules
+#[cfg(test)]
+pub mod tests;

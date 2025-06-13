@@ -63,3 +63,11 @@ anyhow = "1.0"
 # Cryptography for checksums
 sha2 = "0.10"
 
+[dev-dependencies]
+# Testing dependencies for enhanced test infrastructure
+tokio-test = "0.4"      # Async testing utilities
+mockall = "0.11"        # Advanced mocking capabilities
+tempfile = "3.0"        # Temporary file management
+assert_matches = "1.5"  # Pattern matching assertions
+proptest = "1.0"        # Property-based testing
+
